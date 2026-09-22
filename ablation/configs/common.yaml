@@ -5,6 +5,12 @@ experiment:
 selector:
   cmt_ablation_arm: canonical
   cmt_allocation_kl: 0.5
+  cmt_allocation_mode: direct_bounded_gibbs
+  cmt_weight_min: 0.5
+  cmt_weight_max: 2.0
+  cmt_correction_mode: tanh_q99
+  cmt_correction_quantile: 0.99
+  cmt_final_allocation_kl: 0.02
   cmt_gamma: 1.0
   cmt_successor_lambda: 1.0
   top_k: 16
@@ -13,7 +19,7 @@ rollout:
   temperature: 1.0
   top_p: 1.0
 training:
-  learning_rate: 1.0e-6
+  learning_rate: 5.0e-6
 training_evaluation:
   enabled: true
   max_new_tokens: 7168

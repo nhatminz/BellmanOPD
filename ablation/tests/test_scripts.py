@@ -29,7 +29,16 @@ def test_launchers_resolve_paths_from_script_directory():
 
 def test_common_defaults_are_canonical():
     text = (ROOT / "configs/common.yaml").read_text(encoding="utf-8")
-    for expected in ("cmt_allocation_kl: 0.5", "cmt_gamma: 1.0", "cmt_successor_lambda: 1.0", "top_k: 16", "max_new_tokens: 4096"):
+    for expected in (
+        "cmt_allocation_kl: 0.5",
+        "cmt_allocation_mode: direct_bounded_gibbs",
+        "cmt_correction_mode: tanh_q99",
+        "cmt_gamma: 1.0",
+        "cmt_successor_lambda: 1.0",
+        "top_k: 16",
+        "max_new_tokens: 4096",
+        "learning_rate: 5.0e-6",
+    ):
         assert expected in text
     gamma_script = (ROOT / "scripts/sweep_gamma.sh").read_text(encoding="utf-8")
     assert "CMT_GAMMA" in gamma_script
@@ -49,7 +58,39 @@ def test_train_launcher_is_cwd_independent_and_keeps_token_budgets():
             check=True,
         )
         assert "train_max_new_tokens=4096 eval_max_new_tokens=7168" in result.stdout
+        assert "CMT gain support: student_topk" in result.stdout
+        assert "CMT robust correction: tanh_q99" in result.stdout
+        assert "CMT allocation mode: direct_bounded_gibbs" in result.stdout
         assert (output / "ablation_spec.json").is_file()
+
+
+def test_g_arm_dry_run_records_student_topk_gain_support():
+    with tempfile.TemporaryDirectory() as temp:
+        output = Path(temp) / "g"
+        env = dict(os.environ, ABLATION_DRY_RUN="true", OUTPUT_DIR=str(output))
+        subprocess.run(
+            ["bash", str(ROOT / "scripts/train.sh"), "g"],
+            cwd="/tmp",
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        import json
+
+        spec = json.loads((output / "ablation_spec.json").read_text(encoding="utf-8"))
+        assert spec["arm"] == "g"
+        assert spec["cmt_gain_support"] == "student_topk"
+        assert spec["cmt_correction_mode"] == "tanh_q99"
+        assert spec["cmt_allocation_mode"] == "direct_bounded_gibbs"
+
+
+def test_lambda_launcher_has_exact_four_defaults_and_forced_modes():
+    text = (ROOT / "scripts/run_lambda_ablation.sh").read_text(encoding="utf-8")
+    assert "0.25 0.5 1.0 2.0" in text
+    assert "CMT_CORRECTION_MODE=tanh_q99" in text
+    assert "CMT_ALLOCATION_MODE=direct_bounded_gibbs" in text
+    assert '"${SCRIPT_DIR}/train.sh" g_d' in text
 
 
 def test_plot_launcher_uses_a_fresh_named_directory():

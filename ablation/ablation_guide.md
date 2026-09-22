@@ -16,6 +16,11 @@ g_x     : S_t = g_t + successor_excess_t
 g_d     : S_t = learning_value_t = g_t + sequential_gain_t
 ```
 
+Trong cả ba arm, `g_t` đi qua chính call path CMT production và được tính trên
+**Student Top-K**. Teacher chỉ được gather trên các Student Top-K ID cho local
+gain. Union Student/Teacher Top-K chỉ còn dùng cho sequential accessibility;
+không có implementation `g_t` riêng trong thư mục ablation.
+
 `g_d` dùng trực tiếp canonical `learning_value`, vì vậy phải trùng số với CMT
 canonical khi cấu hình giống nhau. `X=successor_excess` không phải `R`, `M`,
 `V` hoặc `H`. Pipeline không đổi:
@@ -31,15 +36,16 @@ Script dùng `SCRIPT_DIR`, nên gọi được từ mọi current working direct
 các export ở đầu `ablation/scripts/train.sh`, hoặc truyền chúng trước lệnh:
 
 ```bash
-cd /mnt/hdd/nhatminh/OPD/BellmanOPD
+cd /workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis
 export CUDA_VISIBLE_DEVICES=0
 export STORAGE_ROOT=/workspace/storage-shared
 export STUDENT_MODEL="nlp/tungdd11/stable-on-policy-distillation/OPD/model/Qwen3-1.7B-Base"
 export TEACHER_MODEL="models/Qwen3-8B"
 export TRAIN_DATASET=competition_math
 export GLOBAL_BATCH_SIZE=64
-export PPO_MINI_BATCH_SIZE=16
-export MICRO_BATCH_SIZE_PER_GPU=8
+export NUM_RESPONSES=4
+export PPO_MINI_BATCH_SIZE=64
+export MICRO_BATCH_SIZE_PER_GPU=16
 export SEED=42
 export ROLLOUT_SEED=42
 export TRAIN_MAX_NEW_TOKENS=4096
@@ -49,8 +55,9 @@ export EVAL_MAX_NEW_TOKENS=7168
 Giá trị canonical của ablation là:
 
 ```text
-top_k=16, cmt_allocation_kl=0.5, cmt_gamma=1.0,
-cmt_successor_lambda=1.0, learning_rate=1e-6,
+top_k=16, cmt_gamma=1.0, cmt_successor_lambda=1.0,
+correction=tanh_q99, allocation=direct_bounded_gibbs,
+weight bounds=[0.5,2.0], final allocation KL=0.02, learning_rate=5e-6,
 rollout temperature=1.0, rollout top_p=1.0
 ```
 
@@ -90,10 +97,10 @@ CMT production không dùng đúng cấu hình so sánh.
 Nếu không đặt `RUN_NAME`, launcher tự tạo tên khoa học dạng:
 
 ```text
-cmt_<arm>_epsilon<eps>_gamma<gamma>_topk<k>_lr<lr>_seed<seed>_<timestamp>
+cmt_<arm>_lambda<lambda>_epsilon<eps>_gamma<gamma>_topk<k>_lr<lr>_seed<seed>_<timestamp>
 ```
 
-Ví dụ `cmt_g_d_epsilon0p5_gamma1p0_topk16_lr1em6_seed42_20260912_200100`.
+Ví dụ `cmt_g_d_lambda1p0_epsilon0p5_gamma1p0_topk16_lr5em6_seed42_...`.
 Output nằm trong `ablation/outputs/<run-name>/` và không bị ghi đè. Smoke run:
 
 ```bash
@@ -353,3 +360,87 @@ bash -n ablation/scripts/*.sh
 
 Các numeric tests cần Python environment có `torch`; launcher/config/CWD tests
 chạy được không cần GPU.
+
+## 10. Ablation `cmt_successor_lambda`
+
+Sweep canonical CMT (`g_d`) dùng bốn giá trị:
+
+```text
+0.25, 0.5, 1.0, 2.0
+```
+
+Launcher khóa cứng `tanh_q99` và `direct_bounded_gibbs`. Nếu shell đang có
+mode khác, script dừng với lỗi thay vì âm thầm chạy một method khác. Mỗi run
+dùng Student Top-K cho `g_t`, output riêng và cùng toàn bộ config còn lại.
+
+### Chạy một seed
+
+```bash
+cd /workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis
+
+export LAMBDA_SWEEP_DIR="$PWD/ablation/outputs/lambda_compmath_seed42"
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+SEEDS="42" \
+  bash ablation/scripts/run_lambda_ablation.sh
+```
+
+Script chạy tuần tự bốn setting trên cùng GPU layout. Có thể smoke-test toàn
+bộ config mà không train:
+
+```bash
+LAMBDA_SWEEP_DIR=/tmp/cmt_lambda_dryrun \
+ABLATION_DRY_RUN=true \
+  bash ablation/scripts/run_lambda_ablation.sh
+```
+
+### Nhiều seed
+
+```bash
+export LAMBDA_SWEEP_DIR="$PWD/ablation/outputs/lambda_compmath_seeds42_43_44"
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+SEEDS="42 43 44" \
+  bash ablation/scripts/run_lambda_ablation.sh
+```
+
+Mỗi seed phải có đủ bốn lambda. Aggregator sẽ fail nếu thiếu setting, trùng
+`(seed, lambda)`, sai Student Top-K gain support, sai robust/allocation mode,
+hoặc có bất kỳ tracked config nào ngoài lambda thay đổi trong cùng seed.
+
+### Tổng hợp
+
+```bash
+bash ablation/scripts/aggregate_lambda_ablation.sh "$LAMBDA_SWEEP_DIR"
+```
+
+Output ở `$LAMBDA_SWEEP_DIR/summary/`:
+
+```text
+lambda_summary.json
+lambda_runs.csv
+lambda_final_eval_summary.csv
+lambda_eval_curves_summary.csv
+lambda_training_diagnostics_summary.csv
+```
+
+Mean và sample standard deviation được tính qua các seed. Với một seed,
+standard deviation được ghi bằng `0`.
+
+### Vẽ toàn bộ figure
+
+```bash
+bash ablation/scripts/plot_lambda_ablation.sh "$LAMBDA_SWEEP_DIR"
+```
+
+Mỗi figure được lưu đồng thời PNG 300 DPI và vector PDF:
+
+```text
+lambda_final_benchmarks.{png,pdf}
+lambda_eval_curves.{png,pdf}
+lambda_allocation_diagnostics.{png,pdf}
+lambda_sequential_saturation.{png,pdf}
+```
+
+Hình sequential dùng `sequential_gain_raw`, tức chính `lambda * D_t` trước
+robust correction, để vẽ `q95/q99(|lambda D_t|)/kappa` và fraction vượt
+`kappa`, `2*kappa`. Hình allocation gồm final KL, normalized ESS, mean/std/max
+weight và fraction chạm upper bound.
