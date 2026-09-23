@@ -1,59 +1,172 @@
 # Thực nghiệm Pass@K (AIME24, AIME25, AMC23)
 
-Pipeline này tái sử dụng nguyên evaluator hiện có của project:
+Pipeline tái sử dụng evaluator/grader hiện có. Mỗi problem lưu toàn bộ
+`responses` và vector `correct`; các Pass@K được tính bởi `metric_problem_score()`
+với estimator `1 - C(n-c,k) / C(n,k)`.
 
-- prompt được render bởi `render_evaluation_prompt()`;
-- response được chấm bởi `grade_evaluation_response()`;
-- mỗi bài lưu nguyên văn toàn bộ `responses` và vector `correct`;
-- mọi Pass@K dùng lại `metric_problem_score()` với estimator
-  `1 - C(n-c,k) / C(n,k)`.
+- AIME24/AIME25 generate một lần với N=128, sau đó tính K=8,16,32,64,128.
+- AMC23 generate một lần với N=64, sau đó tính K=4,8,16,32,64.
 
-Pipeline **không generate riêng cho từng K**. AIME24 và AIME25 được sample đúng
-một lần với `N=128`; AMC23 được sample đúng một lần với `N=64`. Từ cùng vector
-correctness đó, code tính AIME K = 8, 16, 32, 64, 128 và AMC23 K = 4, 8, 16,
-32, 64.
+## 1. Quy ước một checkpoint = một run trong `outputs/`
 
-## 1. Khai báo checkpoint
+Mỗi lần chạy một checkpoint sẽ tạo một thư mục độc lập trong:
 
-Mở `scripts/run_passk_experiment.sh` và sửa mảng `CHECKPOINT_SPECS` ở đầu file.
-Mỗi dòng có format:
+```text
+BellmanOPD_analysis/outputs/<PASSK_RUN_NAME>/
+```
+
+Tên mặc định được tạo tự động theo:
+
+```text
+<method>_checkpoint_<step>_<model_group>_<source_training_run>
+```
+
+Ví dụ:
+
+```text
+cmt_checkpoint_000600_qwen3_4b_cmt_20260918_112926
+opd_checkpoint_000600_qwen3_4b_opd_20260918_104511
+```
+
+Nếu input là `final`, script đọc `latest.json` cạnh checkpoint để lấy step thật.
+Nếu file đó không tồn tại, tên dùng hậu tố `final`. Có thể override bằng
+`PASSK_RUN_NAME=...`, nhưng chỉ khi command chứa đúng một checkpoint.
+
+Mỗi run chứa cả raw generation, cache manifest và summary:
+
+```text
+outputs/<PASSK_RUN_NAME>/
+  runs/<PASSK_RUN_NAME>/<model_group>/<checkpoint-identity>/
+    generations/aime_n128/
+      aime24_predictions.jsonl.gz
+      aime25_predictions.jsonl.gz
+      model_outputs_detailed.jsonl.gz
+      passk_generation_manifest.json
+    generations/amc23_n64/
+      amc23_predictions.jsonl.gz
+      model_outputs_detailed.jsonl.gz
+      passk_generation_manifest.json
+  summaries/
+    passk_summary_<PASSK_RUN_NAME>.json
+    passk_summary_<PASSK_RUN_NAME>.csv
+```
+
+Chạy lại đúng command sẽ reuse raw data hợp lệ (`CACHE HIT`) và không inference
+lại.
+
+## 2. Chạy một checkpoint CMT
+
+Format checkpoint spec:
 
 ```text
 MODEL_GROUP|METHOD|LABEL|CHECKPOINT[|CONFIG]
 ```
 
-Ví dụ đầy đủ cho Qwen3-1.7B và Qwen3-4B:
+Ví dụ checkpoint 600 của CMT/Qwen3-4B:
+
+```bash
+cd /workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+PASSK_WORLD_SIZE=4 \
+bash scripts/run_passk_experiment.sh \
+  "qwen3_4b|cmt|CMT|/workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis/outputs/cmt_20260918_112926/cmt_opd/checkpoint-000600"
+```
+
+Cuối command, terminal in rõ:
+
+```text
+Pass@K run name: cmt_checkpoint_000600_qwen3_4b_cmt_20260918_112926
+Output: .../BellmanOPD_analysis/outputs/cmt_checkpoint_000600_qwen3_4b_cmt_20260918_112926
+```
+
+## 3. Chạy checkpoint OPD độc lập
+
+Checkpoint có thể nằm trong repo `BellmanOPD` cũ; kết quả Pass@K vẫn được lưu
+trong `BellmanOPD_analysis/outputs`:
+
+```bash
+cd /workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+PASSK_WORLD_SIZE=4 \
+bash scripts/run_passk_experiment.sh \
+  "qwen3_4b|opd|OPD|/workspace/storage-shared/nlp/minhpn19/BellmanOPD/outputs/opd_20260918_104511/opd/checkpoint-000600"
+```
+
+Run tự động có dạng:
+
+```text
+opd_checkpoint_000600_qwen3_4b_opd_20260918_104511
+```
+
+## 4. Chạy bằng cách sửa block trong file
+
+Có thể sửa `CHECKPOINT_SPECS` ở đầu `scripts/run_passk_experiment.sh`. Mỗi lần chỉ
+để lại một entry nếu muốn quản lý từng run riêng:
 
 ```bash
 CHECKPOINT_SPECS=(
-  "qwen3_1.7b|opd|OPD|/workspace/storage-shared/nlp/minhpn19/BellmanOPD/outputs/opd_17b_run/opd/final"
-  "qwen3_1.7b|cmt|CMT|/workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis/outputs/cmt_17b_run/cmt_opd/final"
-  "qwen3_4b|opd|OPD|/workspace/storage-shared/nlp/minhpn19/BellmanOPD/outputs/opd_4b_run/opd/final"
-  "qwen3_4b|cmt|CMT|/workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis/outputs/cmt_4b_run/cmt_opd/final"
+  "qwen3_4b|cmt|CMT|/abs/path/cmt_opd/checkpoint-000600"
 )
 ```
 
-`MODEL_GROUP` quyết định checkpoint thuộc figure nào. `LABEL` là tên curve trong
-legend. Có thể thêm tùy ý checkpoint/method; nếu label trùng nhau, plot tự thêm
-tên checkpoint để phân biệt. Trường `CONFIG` cuối là optional. Khi bỏ qua, method
-`opd`, `cmt`, `ta`, `grpo`, `iw`, ... tự chọn config tương ứng trong `configs/`.
-
-## 2. Cấu hình sampling/GPU
-
-Các biến quan trọng đều nằm ở đầu `scripts/run_passk_experiment.sh`:
+Sau đó chạy:
 
 ```bash
-export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
-STORAGE_ROOT="/workspace/storage-shared"
-PASSK_OUTPUT_ROOT="${REPO_DIR}/results/passk"
-PASSK_TAG="eopd_figure7_8_v1"
+CUDA_VISIBLE_DEVICES=0,1,2,3 PASSK_WORLD_SIZE=4 \
+  bash scripts/run_passk_experiment.sh
+```
 
+Script vẫn chấp nhận nhiều specs trong một command, nhưng mỗi spec được chạy tuần
+tự và tạo một thư mục `outputs/<run-name>` riêng.
+
+## 5. Vẽ hình bằng tên hai run trong `outputs/`
+
+Không cần truyền đường dẫn summary. Chỉ cần copy đúng hai tên thư mục trong
+`outputs/`:
+
+```bash
+cd /workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis
+
+bash scripts/plot_passk_experiment.sh \
+  opd_checkpoint_000600_qwen3_4b_opd_20260918_104511 \
+  cmt_checkpoint_000600_qwen3_4b_cmt_20260918_112926
+```
+
+Script tự tìm summary của hai run và tạo comparison directory:
+
+```text
+results/passk/
+  opd_checkpoint_000600_..._vs_cmt_checkpoint_000600_.../
+    passk_qwen3_4b_<comparison-name>.png
+    passk_qwen3_4b_<comparison-name>.pdf
+```
+
+Mỗi model group tạo một figure gồm ba subplot AIME24, AIME25 và AMC23. Nếu figure
+cùng tên đã tồn tại, timestamp/suffix được thêm tự động nên không overwrite.
+
+Có thể so sánh nhiều hơn hai run:
+
+```bash
+bash scripts/plot_passk_experiment.sh \
+  opd_checkpoint_000600_qwen3_4b_run_a \
+  ta_checkpoint_000600_qwen3_4b_run_b \
+  cmt_checkpoint_000600_qwen3_4b_run_c
+```
+
+Plotter vẫn hỗ trợ truyền trực tiếp một hoặc nhiều file summary JSON nếu cần.
+
+## 6. Các biến cấu hình
+
+Các defaults nằm đầu `scripts/run_passk_experiment.sh`:
+
+```bash
 PASSK_BENCHMARKS="AIME24 AIME25 AMC23"
 AIME_K_VALUES="8 16 32 64 128"
 AMC_K_VALUES="4 8 16 32 64"
 AIME_NUM_SAMPLES=128
 AMC_NUM_SAMPLES=64
-
 PASSK_TEMPERATURE=1.0
 PASSK_TOP_P=0.8
 PASSK_MAX_NEW_TOKENS=7168
@@ -64,110 +177,19 @@ PASSK_GPU_MEMORY_UTILIZATION=auto
 PASSK_SEED=1234
 ```
 
-Với `PASSK_WORLD_SIZE=0` và `TP=1`, code dùng toàn bộ GPU trong
-`CUDA_VISIBLE_DEVICES`, mỗi GPU là một vLLM replica độc lập và benchmark được
-shard deterministic. Nếu muốn chỉ dùng 4 GPU, đặt mask thành `0,1,2,3` hoặc đặt
-`PASSK_WORLD_SIZE=4`.
+`PASSK_WORLD_SIZE=0` nghĩa là dùng toàn bộ GPU trong `CUDA_VISIBLE_DEVICES` với
+một vLLM TP=1 replica trên mỗi GPU. `PASSK_PLOT_AFTER_RUN=false` là mặc định;
+comparison chỉ được vẽ khi gọi plot script với các run cần so sánh.
 
-## 3. Chạy toàn bộ experiment
-
-Sau khi sửa mảng trong file:
-
-```bash
-cd /workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-PASSK_WORLD_SIZE=8 \
-PASSK_TAG=eopd_figure7_8_v1 \
-  bash scripts/run_passk_experiment.sh
-```
-
-Hoặc không sửa file, truyền từng spec trực tiếp vào command:
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 PASSK_WORLD_SIZE=4 \
-PASSK_TAG=eopd_figure7_8_v1 \
-bash scripts/run_passk_experiment.sh \
-  "qwen3_1.7b|opd|OPD|/abs/path/opd_17b/opd/final" \
-  "qwen3_1.7b|cmt|CMT|/abs/path/cmt_17b/cmt_opd/final" \
-  "qwen3_4b|opd|OPD|/abs/path/opd_4b/opd/final" \
-  "qwen3_4b|cmt|CMT|/abs/path/cmt_4b/cmt_opd/final"
-```
-
-Script mặc định plot ngay sau khi tổng hợp. Đặt `PASSK_PLOT_AFTER_RUN=false` nếu
-chỉ muốn inference/tổng hợp.
-
-## 4. Cache, resume và raw outputs
-
-Output có cấu trúc:
-
-```text
-results/passk/
-  runs/<tag>/<model_group>/<method-run-checkpoint-hash>/
-    generations/aime_n128/
-      aime24_predictions.jsonl.gz
-      aime25_predictions.jsonl.gz
-      model_outputs_detailed.jsonl.gz
-      summary.json
-      passk_generation_manifest.json
-    generations/amc23_n64/
-      amc23_predictions.jsonl.gz
-      model_outputs_detailed.jsonl.gz
-      summary.json
-      passk_generation_manifest.json
-    passk_results.json
-  summaries/
-    passk_summary_<tag>.json
-    passk_summary_<tag>.csv
-  figures/
-    passk_qwen3_1.7b_<tag>.png
-    passk_qwen3_1.7b_<tag>.pdf
-    passk_qwen3_4b_<tag>.png
-    passk_qwen3_4b_<tag>.pdf
-```
-
-Mỗi prediction row giữ cả `responses` và `correct`. Manifest cache fingerprint
-checkpoint snapshot, benchmark files, prompt/evaluator protocol, N, seed,
-temperature, top-p và cấu hình vLLM. Chạy lại cùng command sẽ báo `CACHE HIT` và
-không inference lại. Cache thiếu response, thiếu correctness hoặc sai N sẽ bị
-từ chối. Artifact cache cũ không hợp lệ được đổi tên `.invalid-<timestamp>` sau
-khi generation mới thành công, không bị xóa âm thầm.
-
-Nếu job dừng giữa chừng, generation directory đang viết nằm trong thư mục
-`.tmp-*`; cache hoàn chỉnh trước đó vẫn nguyên vẹn. Chạy lại command để tiếp tục;
-checkpoint/benchmark đã hoàn tất hợp lệ sẽ được reuse.
-
-## 5. Chỉ plot lại, không inference
-
-```bash
-PASSK_PLOT_TAG=paper_v1 \
-bash scripts/plot_passk_experiment.sh \
-  results/passk/summaries/passk_summary_eopd_figure7_8_v1.json
-```
-
-Có thể gộp nhiều summary độc lập trong một lần plot:
-
-```bash
-PASSK_PLOT_TAG=combined_v1 \
-bash scripts/plot_passk_experiment.sh \
-  results/passk/summaries/passk_summary_run_a.json \
-  results/passk/summaries/passk_summary_run_b.json
-```
-
-Nếu tên figure đã tồn tại, plotter tự thêm timestamp/suffix nên không overwrite.
-Mỗi model group tạo một figure 1×3 subplot, lưu PNG 300 dpi và PDF.
-
-## 6. Smoke test rẻ (không phải kết quả paper)
-
-Để kiểm tra path, prompt, grader, distributed merge và cache trước khi chạy đủ:
+## 7. Smoke test rẻ
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PASSK_WORLD_SIZE=1 \
-PASSK_TAG=passk_smoke \
 AIME_NUM_SAMPLES=8 AMC_NUM_SAMPLES=4 \
 AIME_K_VALUES="1 4 8" AMC_K_VALUES="1 2 4" \
-PASSK_PLOT_AFTER_RUN=false \
+PASSK_RUN_NAME=cmt_passk_smoke \
 bash scripts/run_passk_experiment.sh \
-  "qwen3_1.7b|cmt|CMT-smoke|/abs/path/cmt_opd/final"
+  "qwen3_4b|cmt|CMT-smoke|/abs/path/cmt_opd/checkpoint-000600"
 ```
 
-Không dùng kết quả smoke này trong figure protocol chính vì N/K đã thay đổi.
+Không dùng smoke result cho figure chính vì N/K đã thay đổi.

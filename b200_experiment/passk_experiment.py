@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import time
 import uuid
@@ -31,6 +32,7 @@ DEFAULT_CONFIG_BY_METHOD = {
     "pgt": "qwen3_b200_pgt.yaml",
     "rac": "qwen3_b200_rac.yaml",
 }
+_CHECKPOINT_STEP_PATTERN = re.compile(r"^checkpoint-(\d+)$")
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,40 @@ def _checkpoint_identity(path: Path) -> str:
     """Keep run/method/checkpoint names visible while the hash prevents clashes."""
     parts = path.parts[-3:]
     return _slug("_".join(parts))
+
+
+def checkpoint_step_label(checkpoint: str | Path) -> str:
+    """Return a human-readable checkpoint label, resolving ``final`` when possible."""
+    path = Path(checkpoint).expanduser().resolve()
+    match = _CHECKPOINT_STEP_PATTERN.fullmatch(path.name)
+    if match is not None:
+        return f"checkpoint_{int(match.group(1)):06d}"
+    if path.name == "final":
+        latest_path = path.parent / "latest.json"
+        try:
+            latest = json.loads(latest_path.read_text(encoding="utf-8"))
+            step = int(latest["step"])
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            return "final"
+        if step >= 0:
+            return f"checkpoint_{step:06d}"
+    return _slug(path.name)
+
+
+def automatic_passk_run_name(
+    method: str, model_group: str, checkpoint: str | Path
+) -> str:
+    """Build a stable, readable output name for one Pass@K checkpoint run."""
+    path = Path(checkpoint).expanduser().resolve()
+    source_run = path.parent.parent.name if len(path.parents) >= 2 else path.parent.name
+    return "_".join(
+        (
+            _slug(method),
+            checkpoint_step_label(path),
+            _slug(model_group),
+            _slug(source_run),
+        )
+    )
 
 
 def parse_checkpoint_spec(raw: str, repo_root: Path) -> CheckpointSpec:

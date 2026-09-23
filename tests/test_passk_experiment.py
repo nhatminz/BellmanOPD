@@ -1,15 +1,39 @@
 from __future__ import annotations
 
+import json
 import math
+import tempfile
 import unittest
+from pathlib import Path
 
 from b200_experiment.passk_experiment import (
+    automatic_passk_run_name,
+    checkpoint_step_label,
     compute_passk_metrics,
     summarize_checkpoint_correctness,
 )
 
 
 class PassKExperimentTests(unittest.TestCase):
+    def test_automatic_run_name_contains_method_model_source_and_step(self):
+        checkpoint = Path("/workspace/outputs/cmt_source_run/cmt_opd/checkpoint-000600")
+        self.assertEqual(checkpoint_step_label(checkpoint), "checkpoint_000600")
+        self.assertEqual(
+            automatic_passk_run_name("cmt", "Qwen3-4B", checkpoint),
+            "cmt_checkpoint_000600_qwen3_4b_cmt_source_run",
+        )
+
+    def test_final_checkpoint_uses_latest_step_when_available(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            method_dir = Path(temporary) / "cmt_source" / "cmt_opd"
+            final = method_dir / "final"
+            final.mkdir(parents=True)
+            (method_dir / "latest.json").write_text(
+                json.dumps({"step": 2250, "checkpoint": "final", "final": True}),
+                encoding="utf-8",
+            )
+            self.assertEqual(checkpoint_step_label(final), "checkpoint_002250")
+
     def test_multiple_passk_values_reuse_one_correctness_vector(self):
         # With one success among 16 samples, sampling 8 without replacement
         # finds that success with probability exactly 8/16.

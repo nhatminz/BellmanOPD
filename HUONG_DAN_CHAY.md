@@ -1185,18 +1185,19 @@ Pipeline Pass@K nhiều checkpoint/model size, cache raw responses/correctness v
 plot 3 panel AIME24–AIME25–AMC23 được hướng dẫn đầy đủ tại
 [`PASSK_EXPERIMENT.md`](PASSK_EXPERIMENT.md).
 
-Chạy protocol mặc định (AIME N=128; AMC23 N=64; temperature=1.0; top-p=0.8):
+Mỗi checkpoint tạo một run tự đặt tên trong `outputs/`. Ví dụ:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-PASSK_WORLD_SIZE=8 PASSK_TAG=eopd_figure7_8_v1 \
-  bash scripts/run_passk_experiment.sh
+CUDA_VISIBLE_DEVICES=0,1,2,3 PASSK_WORLD_SIZE=4 \
+bash scripts/run_passk_experiment.sh \
+  "qwen3_4b|cmt|CMT|/abs/path/cmt_opd/checkpoint-000600"
 ```
 
-Chỉ plot lại từ raw summary, hoàn toàn không inference:
+So sánh bằng đúng tên hai thư mục run trong `outputs/`; plotter tự tạo comparison
+folder dưới `results/passk/` và hoàn toàn không inference:
 
 ```bash
-PASSK_PLOT_TAG=paper_v1 \
-  bash scripts/plot_passk_experiment.sh \
-  results/passk/summaries/passk_summary_eopd_figure7_8_v1.json
+bash scripts/plot_passk_experiment.sh \
+  opd_checkpoint_000600_qwen3_4b_opd_run_name \
+  cmt_checkpoint_000600_qwen3_4b_cmt_run_name
 ```

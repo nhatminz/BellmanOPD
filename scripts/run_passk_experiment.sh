@@ -9,8 +9,11 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 # One TP=1 vLLM replica is launched per visible GPU when PASSK_WORLD_SIZE=0.
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 STORAGE_ROOT="${STORAGE_ROOT:-/workspace/storage-shared}"
-PASSK_OUTPUT_ROOT="${PASSK_OUTPUT_ROOT:-${REPO_DIR}/results/passk}"
-PASSK_TAG="${PASSK_TAG:-eopd_figure7_8}"
+# Every checkpoint gets one independently reusable run under outputs/. Set
+# PASSK_RUN_NAME only when launching exactly one checkpoint to override the
+# readable automatic name (e.g. cmt_checkpoint_000600_qwen3_4b_<source-run>).
+PASSK_OUTPUTS_ROOT="${PASSK_OUTPUTS_ROOT:-${REPO_DIR}/outputs}"
+PASSK_RUN_NAME="${PASSK_RUN_NAME:-}"
 
 PASSK_BENCHMARKS="${PASSK_BENCHMARKS:-AIME24 AIME25 AMC23}"
 AIME_K_VALUES="${AIME_K_VALUES:-8 16 32 64 128}"
@@ -29,7 +32,7 @@ PASSK_GPU_HEADROOM_GIB="${PASSK_GPU_HEADROOM_GIB:-4}"
 PASSK_GPU_WORKSPACE_HEADROOM_GIB="${PASSK_GPU_WORKSPACE_HEADROOM_GIB:-2}"
 PASSK_MAX_NUM_SEQS="${PASSK_MAX_NUM_SEQS:-256}"
 PASSK_SEED="${PASSK_SEED:-1234}"
-PASSK_PLOT_AFTER_RUN="${PASSK_PLOT_AFTER_RUN:-true}"
+PASSK_PLOT_AFTER_RUN="${PASSK_PLOT_AFTER_RUN:-false}"
 
 # Format per line/item:
 #   MODEL_GROUP|METHOD|LABEL|CHECKPOINT[|CONFIG]
@@ -69,50 +72,79 @@ if (( ${#BENCHMARK_LIST[@]} == 0 )); then
   exit 2
 fi
 
-CHECKPOINT_ARGS=()
-for spec in "${CHECKPOINT_SPECS[@]}"; do
-  CHECKPOINT_ARGS+=(--checkpoint-spec "${spec}")
-done
-
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
 
-echo "Pass@K tag: ${PASSK_TAG}"
 echo "Visible GPUs: ${CUDA_VISIBLE_DEVICES} (world_size=${PASSK_WORLD_SIZE}, TP=${PASSK_TENSOR_PARALLEL_SIZE})"
 echo "Benchmarks: ${BENCHMARK_LIST[*]}"
 echo "AIME: N=${AIME_NUM_SAMPLES}, K={${AIME_K_VALUES}}"
 echo "AMC23: N=${AMC_NUM_SAMPLES}, K={${AMC_K_VALUES}}"
 echo "Sampling: temperature=${PASSK_TEMPERATURE}, top_p=${PASSK_TOP_P}, seed=${PASSK_SEED}"
-printf 'Checkpoint: %s\n' "${CHECKPOINT_SPECS[@]}"
-
-cd "${REPO_DIR}"
-"${PYTHON_BIN}" -m b200_experiment.passk_experiment \
-  "${CHECKPOINT_ARGS[@]}" \
-  --storage-root "${STORAGE_ROOT}" \
-  --output-root "${PASSK_OUTPUT_ROOT}" \
-  --tag "${PASSK_TAG}" \
-  --benchmarks "${BENCHMARK_LIST[@]}" \
-  --aime-k-values "${AIME_K_VALUES}" \
-  --amc-k-values "${AMC_K_VALUES}" \
-  --aime-num-samples "${AIME_NUM_SAMPLES}" \
-  --amc-num-samples "${AMC_NUM_SAMPLES}" \
-  --temperature "${PASSK_TEMPERATURE}" \
-  --top-p "${PASSK_TOP_P}" \
-  --max-new-tokens "${PASSK_MAX_NEW_TOKENS}" \
-  --max-model-len "${PASSK_MAX_MODEL_LEN}" \
-  --tensor-parallel-size "${PASSK_TENSOR_PARALLEL_SIZE}" \
-  --world-size "${PASSK_WORLD_SIZE}" \
-  --gpu-memory-utilization "${PASSK_GPU_MEMORY_UTILIZATION}" \
-  --gpu-headroom-gib "${PASSK_GPU_HEADROOM_GIB}" \
-  --gpu-workspace-headroom-gib "${PASSK_GPU_WORKSPACE_HEADROOM_GIB}" \
-  --max-num-seqs "${PASSK_MAX_NUM_SEQS}" \
-  --seed "${PASSK_SEED}"
-
-TAG_SLUG="$("${PYTHON_BIN}" -c 'from b200_experiment.passk_experiment import _slug; import sys; print(_slug(sys.argv[1]))' "${PASSK_TAG}")"
-SUMMARY_JSON="${PASSK_OUTPUT_ROOT}/summaries/passk_summary_${TAG_SLUG}.json"
-if [[ "${PASSK_PLOT_AFTER_RUN,,}" =~ ^(1|true|yes)$ ]]; then
-  bash "${SCRIPT_DIR}/plot_passk_experiment.sh" "${SUMMARY_JSON}"
+if [[ -n "${PASSK_RUN_NAME}" ]] && (( ${#CHECKPOINT_SPECS[@]} != 1 )); then
+  echo "PASSK_RUN_NAME can only be used with exactly one checkpoint spec" >&2
+  exit 2
 fi
 
+cd "${REPO_DIR}"
+CREATED_RUN_NAMES=()
+for spec in "${CHECKPOINT_SPECS[@]}"; do
+  IFS='|' read -r MODEL_GROUP METHOD LABEL CHECKPOINT CONFIG EXTRA <<< "${spec}"
+  if [[ -n "${EXTRA:-}" || -z "${MODEL_GROUP:-}" || -z "${METHOD:-}" || -z "${LABEL:-}" || -z "${CHECKPOINT:-}" ]]; then
+    echo "Invalid checkpoint spec: ${spec}" >&2
+    echo "Expected MODEL_GROUP|METHOD|LABEL|CHECKPOINT[|CONFIG]" >&2
+    exit 2
+  fi
+
+  AUTO_RUN_NAME="$(
+    "${PYTHON_BIN}" -c \
+      'from b200_experiment.passk_experiment import automatic_passk_run_name; import sys; print(automatic_passk_run_name(*sys.argv[1:]))' \
+      "${METHOD}" "${MODEL_GROUP}" "${CHECKPOINT}"
+  )"
+  RUN_NAME="${PASSK_RUN_NAME:-${AUTO_RUN_NAME}}"
+  if ! [[ "${RUN_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid PASSK run name: ${RUN_NAME}" >&2
+    exit 2
+  fi
+  RUN_OUTPUT="${PASSK_OUTPUTS_ROOT%/}/${RUN_NAME}"
+  RUN_SPEC="${MODEL_GROUP}|${METHOD}|${LABEL}|${CHECKPOINT}"
+  if [[ -n "${CONFIG:-}" ]]; then
+    RUN_SPEC+="|${CONFIG}"
+  fi
+
+  echo
+  echo "Pass@K run name: ${RUN_NAME}"
+  echo "Checkpoint: ${CHECKPOINT}"
+  echo "Output: ${RUN_OUTPUT}"
+
+  "${PYTHON_BIN}" -m b200_experiment.passk_experiment \
+    --checkpoint-spec "${RUN_SPEC}" \
+    --storage-root "${STORAGE_ROOT}" \
+    --output-root "${RUN_OUTPUT}" \
+    --tag "${RUN_NAME}" \
+    --benchmarks "${BENCHMARK_LIST[@]}" \
+    --aime-k-values "${AIME_K_VALUES}" \
+    --amc-k-values "${AMC_K_VALUES}" \
+    --aime-num-samples "${AIME_NUM_SAMPLES}" \
+    --amc-num-samples "${AMC_NUM_SAMPLES}" \
+    --temperature "${PASSK_TEMPERATURE}" \
+    --top-p "${PASSK_TOP_P}" \
+    --max-new-tokens "${PASSK_MAX_NEW_TOKENS}" \
+    --max-model-len "${PASSK_MAX_MODEL_LEN}" \
+    --tensor-parallel-size "${PASSK_TENSOR_PARALLEL_SIZE}" \
+    --world-size "${PASSK_WORLD_SIZE}" \
+    --gpu-memory-utilization "${PASSK_GPU_MEMORY_UTILIZATION}" \
+    --gpu-headroom-gib "${PASSK_GPU_HEADROOM_GIB}" \
+    --gpu-workspace-headroom-gib "${PASSK_GPU_WORKSPACE_HEADROOM_GIB}" \
+    --max-num-seqs "${PASSK_MAX_NUM_SEQS}" \
+    --seed "${PASSK_SEED}"
+  CREATED_RUN_NAMES+=("${RUN_NAME}")
+done
+
+echo
+echo "Created/reused Pass@K run(s): ${CREATED_RUN_NAMES[*]}"
+echo "Compare them with: bash scripts/plot_passk_experiment.sh ${CREATED_RUN_NAMES[*]}"
+if [[ "${PASSK_PLOT_AFTER_RUN,,}" =~ ^(1|true|yes)$ ]]; then
+  bash "${SCRIPT_DIR}/plot_passk_experiment.sh" "${CREATED_RUN_NAMES[@]}"
+fi
