@@ -1178,3 +1178,25 @@ Nhóm `cmt/rollout/*` chứa correction kappa/quantiles/saturation. Nhóm
 `cmt/allocation_group/*` chứa beta, log-c, target/final KL, mean-one error, tỷ lệ chạm bounds,
 normalized ESS và max-token probability của đúng optimizer group. Loss luôn dùng final `w`;
 `w_raw` chỉ phục vụ diagnostics trong direct mode.
+
+## 12. Experiment Pass@K kiểu EOPD Appendix D / Figure 7–8
+
+Pipeline Pass@K nhiều checkpoint/model size, cache raw responses/correctness và
+plot 3 panel AIME24–AIME25–AMC23 được hướng dẫn đầy đủ tại
+[`PASSK_EXPERIMENT.md`](PASSK_EXPERIMENT.md).
+
+Chạy protocol mặc định (AIME N=128; AMC23 N=64; temperature=1.0; top-p=0.8):
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+PASSK_WORLD_SIZE=8 PASSK_TAG=eopd_figure7_8_v1 \
+  bash scripts/run_passk_experiment.sh
+```
+
+Chỉ plot lại từ raw summary, hoàn toàn không inference:
+
+```bash
+PASSK_PLOT_TAG=paper_v1 \
+  bash scripts/plot_passk_experiment.sh \
+  results/passk/summaries/passk_summary_eopd_figure7_8_v1.json
+```
