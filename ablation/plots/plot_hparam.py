@@ -33,7 +33,20 @@ def _result(row, benchmark, metric):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--parameter", choices=("epsilon", "gamma", "cmt_gamma", "top_k", "lr", "learning_rate"), required=True)
+    parser.add_argument(
+        "--parameter",
+        choices=(
+            "epsilon",
+            "gamma",
+            "cmt_gamma",
+            "top_k",
+            "final_allocation_kl",
+            "final_kl",
+            "lr",
+            "learning_rate",
+        ),
+        required=True,
+    )
     parser.add_argument("--input-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--benchmark", default="MATH-500")
@@ -46,7 +59,16 @@ def main() -> int:
     import matplotlib.pyplot as plt
     import numpy as np
 
-    key = {"epsilon": "cmt_allocation_kl", "gamma": "cmt_gamma", "cmt_gamma": "cmt_gamma", "top_k": "top_k", "lr": "learning_rate", "learning_rate": "learning_rate"}[args.parameter]
+    key = {
+        "epsilon": "cmt_allocation_kl",
+        "gamma": "cmt_gamma",
+        "cmt_gamma": "cmt_gamma",
+        "top_k": "top_k",
+        "final_allocation_kl": "cmt_final_allocation_kl",
+        "final_kl": "cmt_final_allocation_kl",
+        "lr": "learning_rate",
+        "learning_rate": "learning_rate",
+    }[args.parameter]
     points = []
     for spec_path in sorted(args.input_root.rglob("ablation_spec.json")):
         if args.run_names and spec_path.parent.name not in set(args.run_names):

@@ -7,7 +7,7 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 export INPUT_ROOT="${INPUT_ROOT:-${SCRIPT_DIR}/../outputs}"
 FIGURE_ROOT="${FIGURE_ROOT:-${OUTPUT_DIR:-${SCRIPT_DIR}/../figures}}"
-# modes: arms, epsilon, gamma, top_k, lr, diagnostics
+# modes: arms, epsilon, gamma, top_k, final_allocation_kl, lr, diagnostics
 export PLOT_MODE="${PLOT_MODE:-arms}"
 export BENCHMARK="${BENCHMARK:-MATH-500}"
 # The arms comparison mirrors the main training plot and shows all six
@@ -64,7 +64,7 @@ case "${PLOT_MODE}" in
       )
     fi
     ;;
-  epsilon|gamma|top_k|lr)
+  epsilon|gamma|top_k|final_allocation_kl|final_kl|lr)
     COMMAND=("${PYTHON_BIN}" "${SCRIPT_DIR}/../plots/plot_hparam.py"
       --parameter "${PLOT_MODE}" --input-root "${INPUT_ROOT}"
       --output-dir "${OUTPUT_DIR}" --benchmark "${BENCHMARK}"
@@ -75,7 +75,7 @@ case "${PLOT_MODE}" in
       --input-root "${INPUT_ROOT}" --output-dir "${OUTPUT_DIR}")
     ;;
   *)
-    echo "PLOT_MODE must be arms, epsilon, gamma, top_k, lr, or diagnostics" >&2
+    echo "PLOT_MODE must be arms, epsilon, gamma, top_k, final_allocation_kl, lr, or diagnostics" >&2
     exit 2
     ;;
 esac

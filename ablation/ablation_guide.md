@@ -131,6 +131,9 @@ CUDA_VISIBLE_DEVICES=0 LR=5e-7 \
 
 CUDA_VISIBLE_DEVICES=0 GAMMA=0.99 \
   bash ablation/scripts/sweep_gamma.sh
+
+CUDA_VISIBLE_DEVICES=0 CMT_FINAL_ALLOCATION_KL=0.02 \
+  bash ablation/scripts/sweep_final_allocation_kl.sh
 ```
 
 `TOP_K` hiện là hyperparameter thật, không còn bị khóa ở 16. Với CMT analysis:
@@ -144,6 +147,39 @@ CUDA_VISIBLE_DEVICES=0 GAMMA=0.99 \
 
 Các giá trị khuyến nghị ban đầu là `8 16 32`; có thể thêm `4` hoặc `64` nếu đủ
 compute. K lớn hơn làm tăng scoring/loss memory gần tuyến tính theo K.
+
+### Ablation final allocation KL (1 epoch)
+
+Với `direct_bounded_gibbs`, `cmt_final_allocation_kl` là KL budget của final
+token weights so với uniform allocation. Sweep mặc định dùng
+`0.0 0.005 0.02 0.05`: `0.0` là đối chứng uniform, `0.005` là allocation nhẹ,
+`0.02` là baseline hiện tại và `0.05` cho phép concentration mạnh hơn. Script
+bắt buộc `tanh_q99`, `direct_bounded_gibbs` và đúng một epoch.
+
+Chạy tuần tự trên một GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+FINAL_ALLOCATION_KL_VALUES="0.0 0.005 0.02 0.05" \
+  bash ablation/scripts/run_final_allocation_kl_ablation.sh
+```
+
+Chạy song song trên bốn GPU:
+
+```bash
+GPU_LIST=0,1,2,3 FINAL_KL_RUN_MODE=parallel \
+FINAL_ALLOCATION_KL_VALUES="0.0 0.005 0.02 0.05" \
+  bash ablation/scripts/run_final_allocation_kl_ablation.sh
+```
+
+Vẽ kết quả sau khi thay đúng bốn run name đã sinh:
+
+```bash
+RUN_NAMES="analysis_final_kl_0.0_seed42_TAG analysis_final_kl_0.005_seed42_TAG analysis_final_kl_0.02_seed42_TAG analysis_final_kl_0.05_seed42_TAG" \
+PLOT_MODE=final_allocation_kl BENCHMARK=MATH-500 \
+PLOT_TAG=final_allocation_kl_1epoch \
+  bash ablation/scripts/plot_ablation.sh
+```
 
 Các run hoàn toàn độc lập. Ví dụ hôm nay chạy epsilon 0.25, hôm khác chạy
 epsilon 0.5:

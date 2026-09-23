@@ -101,6 +101,7 @@ echo "CMT gain support: student_topk"
 echo "CMT successor lambda: ${CMT_SUCCESSOR_LAMBDA}"
 echo "CMT robust correction: ${CMT_CORRECTION_MODE} (q=${CMT_CORRECTION_QUANTILE})"
 echo "CMT allocation mode: ${CMT_ALLOCATION_MODE}"
+echo "CMT final allocation KL: ${CMT_FINAL_ALLOCATION_KL}"
 "${PYTHON_BIN}" "${SCRIPT_DIR}/../analysis/write_spec.py" "${OUTPUT_DIR}" "${ARM}"
 
 cd "${REPO_DIR}"

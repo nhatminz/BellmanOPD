@@ -126,6 +126,47 @@ def test_lambda_launcher_has_exact_four_defaults_and_forced_modes():
     assert '"${SCRIPT_DIR}/train.sh" g_d' in text
 
 
+def test_final_allocation_kl_launcher_is_one_epoch_and_forces_current_modes():
+    text = (ROOT / "scripts/run_final_allocation_kl_ablation.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "0.0 0.005 0.02 0.05" in text
+    assert "NUM_EPOCHS=1" in text
+    assert "CMT_CORRECTION_MODE=tanh_q99" in text
+    assert "CMT_ALLOCATION_MODE=direct_bounded_gibbs" in text
+    assert "CMT_FINAL_ALLOCATION_KL" in (
+        ROOT / "scripts/sweep_parallel.sh"
+    ).read_text(encoding="utf-8")
+
+
+def test_final_allocation_kl_single_run_records_requested_budget_and_epoch():
+    import json
+
+    with tempfile.TemporaryDirectory() as temp:
+        output = Path(temp) / "final-kl"
+        env = dict(
+            os.environ,
+            ABLATION_DRY_RUN="true",
+            OUTPUT_DIR=str(output),
+            CMT_FINAL_ALLOCATION_KL="0.005",
+            NUM_EPOCHS="9",
+        )
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts/sweep_final_allocation_kl.sh")],
+            cwd="/tmp",
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        spec = json.loads((output / "ablation_spec.json").read_text(encoding="utf-8"))
+        assert spec["cmt_final_allocation_kl"] == 0.005
+        assert spec["num_epochs"] == 1
+        assert spec["cmt_correction_mode"] == "tanh_q99"
+        assert spec["cmt_allocation_mode"] == "direct_bounded_gibbs"
+        assert "Final allocation KL: 0.005" in result.stdout
+
+
 def test_plot_launcher_uses_a_fresh_named_directory():
     text = (ROOT / "scripts/plot_ablation.sh").read_text(encoding="utf-8")
     assert "FIGURE_ROOT" in text

@@ -22,13 +22,18 @@ case "${PARAM}" in
     PREFIX=topk
     VAR=TOP_K
     ;;
+  final_allocation_kl|final_kl)
+    VALUES="${FINAL_ALLOCATION_KL_VALUES:-0.0 0.005 0.02 0.05}"
+    PREFIX=final_kl
+    VAR=CMT_FINAL_ALLOCATION_KL
+    ;;
   lr|learning_rate)
     VALUES="${LR_VALUES:-5e-7 1e-6 2e-6}"
     PREFIX=lr
     VAR=LR
     ;;
   *)
-    echo "Usage: $0 epsilon|gamma|top_k|lr" >&2
+    echo "Usage: $0 epsilon|gamma|top_k|final_allocation_kl|lr" >&2
     echo "Example: GPU_GROUPS='0,1;2,3;4,5;6,7'" >&2
     exit 2
     ;;
