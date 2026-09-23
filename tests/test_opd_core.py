@@ -5,7 +5,7 @@ import unittest
 import torch
 
 from b200_experiment.opd_core import (
-    OPD_LOSS_TOP_K,
+    DEFAULT_OPD_TOP_K,
     TopKOPDReference,
     build_topk_opd_reference,
     build_student_topk_opd_reference,
@@ -17,29 +17,35 @@ from b200_experiment.opd_core import (
 
 
 class TopKOPDCoreTests(unittest.TestCase):
-    def test_all_distillation_methods_share_student_top16_loss_support(self):
-        student_ids = torch.arange(OPD_LOSS_TOP_K).reshape(1, 1, -1)
-        student = torch.log_softmax(torch.randn(1, 1, OPD_LOSS_TOP_K), dim=-1)
-        teacher_on_student = torch.log_softmax(
-            torch.randn(1, 1, OPD_LOSS_TOP_K), dim=-1
-        )
+    def test_all_distillation_methods_accept_configured_student_topk_loss_support(self):
         valid = torch.tensor([[True]])
         for method in ("opd", "ta", "cmt"):
-            with self.subTest(method=method):
-                reference = build_student_topk_opd_reference(
-                    student_ids, student, teacher_on_student, valid
-                )
-                self.assertTrue(torch.equal(reference.candidate_ids, student_ids))
-                self.assertEqual(reference.candidate_ids.shape[-1], 16)
+            for top_k in (4, 8, 16, 32):
+                with self.subTest(method=method, top_k=top_k):
+                    student_ids = torch.arange(top_k).reshape(1, 1, -1)
+                    student = torch.log_softmax(torch.randn(1, 1, top_k), dim=-1)
+                    teacher_on_student = torch.log_softmax(
+                        torch.randn(1, 1, top_k), dim=-1
+                    )
+                    reference = build_student_topk_opd_reference(
+                        student_ids,
+                        student,
+                        teacher_on_student,
+                        valid,
+                        top_k=top_k,
+                    )
+                    self.assertTrue(torch.equal(reference.candidate_ids, student_ids))
+                    self.assertEqual(reference.candidate_ids.shape[-1], top_k)
 
     def test_union_width_is_rejected_by_policy_loss_builder(self):
-        union_width = 2 * OPD_LOSS_TOP_K
-        with self.assertRaisesRegex(ValueError, "exactly Student Top-16"):
+        union_width = 2 * DEFAULT_OPD_TOP_K
+        with self.assertRaisesRegex(ValueError, "configured Student Top-K"):
             build_student_topk_opd_reference(
                 torch.arange(union_width).reshape(1, 1, -1),
                 torch.zeros(1, 1, union_width),
                 torch.zeros(1, 1, union_width),
                 torch.tensor([[True]]),
+                top_k=DEFAULT_OPD_TOP_K,
             )
 
     def test_inference_mode_scores_are_materialized_before_backward(self):

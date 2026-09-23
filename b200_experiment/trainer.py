@@ -87,7 +87,7 @@ from .fsdp import (
 from .opd_core import (
     UPSTREAM_ADV_ESTIMATOR,
     UPSTREAM_LOSS_AGG_MODE,
-    OPD_LOSS_TOP_K,
+    DEFAULT_OPD_TOP_K,
     UPSTREAM_OPD_COMMIT,
     UPSTREAM_REWARD_WEIGHT_MODE,
     UPSTREAM_TOP_K_STRATEGY,
@@ -3337,14 +3337,9 @@ def run_training(
             "This controlled experiment supports only the pinned thunlp/OPD "
             f"recipe; incompatible settings: {incompatible}"
         )
-    configured_top_k = int(config["selector"].get("top_k", OPD_LOSS_TOP_K))
+    configured_top_k = int(config["selector"].get("top_k", DEFAULT_OPD_TOP_K))
     if configured_top_k <= 0:
         raise ValueError("selector.top_k must be positive")
-    if method in {"opd", "ta", "cmt"} and configured_top_k != OPD_LOSS_TOP_K:
-        raise ValueError(
-            f"{method.upper()} requires selector.top_k={OPD_LOSS_TOP_K} so the "
-            "policy-loss support is exactly Student Top-16"
-        )
     cmt_allocation_mode, cmt_weight_min, cmt_weight_max = validate_cmt_allocation(
         config["selector"].get("cmt_allocation_mode", "gibbs"),
         config["selector"].get("cmt_weight_min", 0.5),
@@ -3617,6 +3612,8 @@ def run_training(
             "commit": UPSTREAM_OPD_COMMIT,
             "adv_estimator": advantage_estimator,
             "top_k_strategy": top_k_strategy,
+            "top_k": configured_top_k,
+            "loss_support_definition": "student_topk",
             "reward_weight_mode": reward_weight_mode,
             "loss_agg_mode": loss_aggregation,
         }
@@ -4042,10 +4039,12 @@ def run_training(
                 student_scores.top_k_log_probs,
                 teacher_scores.candidate_log_probs,
                 valid,
+                top_k=top_k,
             )
             if not torch.equal(opd_reference.candidate_ids, student_scores.top_k_ids):
                 raise AssertionError(
-                    f"{method.upper()} policy-loss support differs from Student Top-16"
+                    f"{method.upper()} policy-loss support differs from configured "
+                    f"Student Top-{top_k}"
                 )
         else:
             opd_reference = build_topk_opd_reference(

@@ -158,19 +158,17 @@ def test_union_is_not_passed_to_policy_loss():
     inputs = _inputs()
     output = PGTSelector().compute_scores_from_topk(*inputs)
     student_ids, _, student_logp, teacher_on_student, *_ = inputs
-    # Expand this synthetic K=3 fixture to the production K=16 invariant.
-    student_ids_16 = student_ids[..., :1].expand(-1, -1, 16).clone()
-    student_logp_16 = student_logp[..., :1].expand(-1, -1, 16).clone()
-    teacher_on_student_16 = teacher_on_student[..., :1].expand(-1, -1, 16).clone()
+    top_k = student_ids.shape[-1]
     reference = build_student_topk_opd_reference(
-        student_ids_16,
-        student_logp_16,
-        teacher_on_student_16,
+        student_ids,
+        student_logp,
+        teacher_on_student,
         torch.tensor([[True, True]]),
+        top_k=top_k,
     )
-    assert torch.equal(reference.candidate_ids, student_ids_16)
-    assert reference.candidate_ids.shape[-1] == 16
-    assert output.candidate_ids.shape[-1] == 6
+    assert torch.equal(reference.candidate_ids, student_ids)
+    assert reference.candidate_ids.shape[-1] == top_k
+    assert output.candidate_ids.shape[-1] == 2 * top_k
 
 
 def test_cmt_preserves_union_only_as_transition_support():

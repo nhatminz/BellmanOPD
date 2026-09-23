@@ -85,6 +85,39 @@ def test_g_arm_dry_run_records_student_topk_gain_support():
         assert spec["cmt_allocation_mode"] == "direct_bounded_gibbs"
 
 
+def test_topk_ablation_resolves_multiple_student_topk_values():
+    import json
+
+    with tempfile.TemporaryDirectory() as temp:
+        for top_k in (8, 16, 32):
+            output = Path(temp) / f"topk-{top_k}"
+            env = dict(
+                os.environ,
+                ABLATION_DRY_RUN="true",
+                OUTPUT_DIR=str(output),
+                TOP_K=str(top_k),
+            )
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts/train.sh"), "g_d"],
+                cwd="/tmp",
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            spec = json.loads(
+                (output / "ablation_spec.json").read_text(encoding="utf-8")
+            )
+            assert spec["top_k"] == top_k
+            assert spec["cmt_gain_support"] == "student_topk"
+            assert f"top_k={top_k}" in result.stdout
+
+
+def test_topk_launcher_keeps_current_learning_rate_default():
+    text = (ROOT / "scripts/sweep_topk.sh").read_text(encoding="utf-8")
+    assert 'LEARNING_RATE="${LEARNING_RATE:-5e-6}"' in text
+
+
 def test_lambda_launcher_has_exact_four_defaults_and_forced_modes():
     text = (ROOT / "scripts/run_lambda_ablation.sh").read_text(encoding="utf-8")
     assert "0.25 0.5 1.0 2.0" in text

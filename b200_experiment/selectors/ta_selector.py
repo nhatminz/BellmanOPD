@@ -40,7 +40,7 @@ class TASelector:
         at each position. Renormalizing their union therefore produces exactly
         the same D and C as ``compute_scores_from_logits`` without retaining a
         [B,T,V] tensor for either model. This union is selection-only; the OPD
-        policy loss is independently restricted to Student Top-16.
+        policy loss is independently restricted to the configured Student Top-K.
         """
         tensors = (
             student_top_k_ids,

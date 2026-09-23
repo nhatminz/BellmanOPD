@@ -12,7 +12,11 @@ UPSTREAM_TOP_K_STRATEGY = "only_stu"
 UPSTREAM_REWARD_WEIGHT_MODE = "student_p"
 UPSTREAM_ADV_ESTIMATOR = "token_reward_direct"
 UPSTREAM_LOSS_AGG_MODE = "token-mean"
-OPD_LOSS_TOP_K = 16
+# Default experiment value, not a fixed objective constraint. Top-K ablations
+# pass their configured K through scoring, the frozen reference, and loss.
+DEFAULT_OPD_TOP_K = 16
+# Backward-compatible import alias for older analysis/tests.
+OPD_LOSS_TOP_K = DEFAULT_OPD_TOP_K
 
 
 def compute_iw_opd_weights(
@@ -198,19 +202,24 @@ def build_student_topk_opd_reference(
     student_top_k_log_probs: torch.Tensor,
     teacher_on_student_log_probs: torch.Tensor,
     valid_mask: torch.Tensor,
+    *,
+    top_k: int,
 ) -> TopKOPDReference:
-    """Build the invariant Student-Top-16 policy-loss reference.
+    """Build a policy-loss reference on exactly the configured Student Top-K.
 
     TA uses a larger union for selection, while CMT uses it only for sequential
     accessibility (its local g_t is Student Top-K). That union is intentionally
-    absent from this API. This makes it
-    impossible for teacher-only Top-K IDs to enter the differentiable OPD
-    candidate loss through the production reference builder.
+    absent from this API. ``top_k`` validates the candidate width selected by
+    the current experiment, making it impossible to pass the 2K selector union
+    into the differentiable OPD loss during a Top-K ablation.
     """
-    if student_top_k_ids.shape[-1] != OPD_LOSS_TOP_K:
+    expected_top_k = int(top_k)
+    if expected_top_k <= 0:
+        raise ValueError("OPD loss Student top_k must be positive")
+    if student_top_k_ids.shape[-1] != expected_top_k:
         raise ValueError(
-            "OPD loss support must contain exactly Student Top-16 IDs; "
-            f"got K={student_top_k_ids.shape[-1]}"
+            "OPD loss support must contain exactly the configured Student Top-K "
+            f"IDs (K={expected_top_k}); got K={student_top_k_ids.shape[-1]}"
         )
     return build_topk_opd_reference(
         student_top_k_ids,

@@ -133,6 +133,18 @@ CUDA_VISIBLE_DEVICES=0 GAMMA=0.99 \
   bash ablation/scripts/sweep_gamma.sh
 ```
 
+`TOP_K` hiện là hyperparameter thật, không còn bị khóa ở 16. Với CMT analysis:
+
+- `g_t` được tính trên đúng Student Top-K(K), với student và teacher cùng được
+  renormalize trên các Student Top-K IDs đó;
+- OPD candidate loss cũng chỉ chứa đúng Student Top-K(K);
+- teacher-only Top-K IDs không đi vào `g_t` hay policy loss;
+- union student/teacher Top-K chỉ còn phục vụ sequential accessibility kernel
+  như formulation CMT hiện tại, không nhận gradient từ OPD loss.
+
+Các giá trị khuyến nghị ban đầu là `8 16 32`; có thể thêm `4` hoặc `64` nếu đủ
+compute. K lớn hơn làm tăng scoring/loss memory gần tuyến tính theo K.
+
 Các run hoàn toàn độc lập. Ví dụ hôm nay chạy epsilon 0.25, hôm khác chạy
 epsilon 0.5:
 

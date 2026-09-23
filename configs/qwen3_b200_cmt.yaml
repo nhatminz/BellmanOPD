@@ -6,7 +6,8 @@ experiment:
 
 # Coupled Marginal Teachability uses conditional Student Top-K for local g_t.
 # Its distinct raw-mass truncated common-mass kernel keeps the student/teacher
-# Top-K union for sequential accessibility. The OPD loss remains Student Top-16.
+# Top-K union for sequential accessibility. The OPD loss remains exactly the
+# configured Student Top-K; teacher-only tokens never enter the policy loss.
 # Exact full-vocabulary reductions are opt-in diagnostics only.
 rollout:
   num_responses: 4

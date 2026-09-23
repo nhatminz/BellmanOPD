@@ -33,8 +33,8 @@ class PGTSelector:
     This is not a divergence/overlap heuristic: a constant log-ratio has zero
     policy gradient and therefore zero PGT value. The returned union is a
     selector/CMT scoring support only. Production OPD optimization separately
-    uses Student Top-16, so teacher-only union actions can change teachability
-    without becoming policy-loss candidates. All outputs are detached.
+    uses the configured Student Top-K, so teacher-only union actions can change
+    teachability without becoming policy-loss candidates. All outputs are detached.
     """
 
     @torch.inference_mode()

@@ -513,7 +513,8 @@ class CMTSelector:
     local-only ablation.
     Descendant values are frozen in this categorical surrogate; no causal
     shared-neural-network claim is made. This union never becomes the OPD loss
-    support: optimization is separately restricted to Student Top-16.
+    support: optimization is separately restricted to the configured Student
+    Top-K.
     """
 
     def __init__(
