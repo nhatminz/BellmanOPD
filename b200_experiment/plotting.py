@@ -163,13 +163,27 @@ def _normalize_progress_methods(
     return tuple(selected)
 
 
-def _read_eval_history(output: str | Path | None, method: str) -> list[dict]:
+def _evaluation_history_filename(evaluation_metric: str | None) -> str:
+    if evaluation_metric is None or not str(evaluation_metric).strip():
+        return "eval_history.jsonl"
+    normalized = str(evaluation_metric).strip().lower()
+    slug = normalized.replace("@", "_at_").replace("-", "_")
+    return f"eval_history_{slug}.jsonl"
+
+
+def _read_eval_history(
+    output: str | Path | None,
+    method: str,
+    evaluation_metric: str | None = None,
+) -> list[dict]:
     spec = _PROGRESS_METHODS[method]
     if output is None:
         raise ValueError(
             f"{spec['output_argument']} is required when plotting {spec['label']}"
         )
-    history_path = Path(output).resolve() / "eval_history.jsonl"
+    history_path = (
+        Path(output).resolve() / _evaluation_history_filename(evaluation_metric)
+    )
     if not history_path.is_file():
         raise FileNotFoundError(
             f"Missing {spec['label']} evaluation history: {history_path}"
@@ -872,6 +886,7 @@ def plot_training_progress(
     cmt_output: str | Path | None = None,
     grpo_output: str | Path | None = None,
     iw_output: str | Path | None = None,
+    evaluation_metric: str | None = None,
 ):
     """Plot the configured evaluation metric for any selected methods."""
     results_dir = Path(results_dir).resolve()
@@ -887,11 +902,20 @@ def plot_training_progress(
         "iw": iw_output,
     }
     histories = {
-        _PROGRESS_METHODS[item]["label"]: _read_eval_history(outputs[item], item)
+        _PROGRESS_METHODS[item]["label"]: _read_eval_history(
+            outputs[item], item, evaluation_metric
+        )
         for item in selected_methods
     }
     benchmark_names = _shared_history_benchmarks(histories)
     metric_name = _history_metric_name(histories)
+    if evaluation_metric is not None:
+        requested_metric = str(evaluation_metric).strip().lower()
+        if metric_name != requested_metric:
+            raise ValueError(
+                f"Requested plot metric {requested_metric!r}, but selected histories "
+                f"report {metric_name!r}"
+            )
 
     base_accuracy: dict[str, float] = {}
     for benchmark in benchmark_names:

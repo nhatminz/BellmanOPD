@@ -717,6 +717,45 @@ Pass@8 được lưu riêng trong `eval_history_pass_at_8.jsonl`,
 `training_eval_pass_at_8/`; history metric khác không bị ghi đè. Chạy lại đúng pass@8 sẽ replace
 bộ artifact pass@8 hiện có.
 
+Nếu re-evaluation bị ngắt, mỗi `step-XXXXXX` đã commit vẫn có thể được tổng
+hợp ngay thành history pass@8 mà không inference lại. Truyền đường dẫn chính
+xác tới method output (thư mục chứa `resolved_config.yaml`):
+
+```bash
+bash scripts/rebuild_pass8_history_b200.sh cmt \
+  outputs/<CMT_RUN>/cmt_opd
+```
+
+Có thể tổng hợp output nằm ở repository khác:
+
+```bash
+bash scripts/rebuild_pass8_history_b200.sh opd \
+  /workspace/storage-shared/nlp/minhpn19/BellmanOPD/outputs/<OPD_RUN>/opd
+```
+
+Recovery chỉ nhận thư mục `step-XXXXXX` có `summary.json`, prediction files và
+detailed output đầy đủ. Step đang dở hoặc `.reeval-step-*` bị bỏ qua. Lệnh thay
+atomically `eval_history_pass_at_8.jsonl` và `eval_metrics_pass_at_8.csv`, đồng
+thời ghi `eval_history_recovery_pass_at_8.json` liệt kê chính xác các step đã
+khôi phục; nó không đánh dấu sweep là hoàn tất.
+
+Vẽ pass@8 OPD/TA/CMT khi output có thể nằm ở các repository khác nhau:
+
+```bash
+PLOT_METHODS="opd ta cmt" \
+PLOT_EVAL_METRIC=pass@8 \
+OPD_RUN_NAME="<OPD_RUN>" TA_RUN_NAME="<TA_RUN>" CMT_RUN_NAME="<CMT_RUN>" \
+OPD_OUTPUT_DIR="/workspace/storage-shared/nlp/minhpn19/BellmanOPD/outputs/<OPD_RUN>/opd" \
+TA_OUTPUT_DIR="/workspace/storage-shared/nlp/minhpn19/BellmanOPD/outputs/<TA_RUN>/ta_opd" \
+CMT_OUTPUT_DIR="/workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis/outputs/<CMT_RUN>/cmt_opd" \
+RESULTS_DIR="/workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis/results/pass8_opd_ta_cmt" \
+  bash scripts/plot_pass8_training_progress.sh --plot-name pass8_over_steps
+```
+
+Plotter đọc trực tiếp `eval_history_pass_at_8.jsonl`; không copy, symlink hay
+thay đổi `eval_history.jsonl` avg@8. Các panel, scale trục, missing-step handling
+và OPD/CMT base-alignment giữ cùng logic với biểu đồ avg@8.
+
 Re-evaluate nhiều method cùng protocol:
 
 ```bash

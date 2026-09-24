@@ -329,6 +329,13 @@ def build_parser() -> argparse.ArgumentParser:
     progress_plot.add_argument("--iw-output")
     progress_plot.add_argument("--smoothing-window", type=int, default=10)
     progress_plot.add_argument("--plot-name")
+    progress_plot.add_argument(
+        "--evaluation-metric",
+        help=(
+            "Read a metric-specific history, e.g. pass@8 reads "
+            "eval_history_pass_at_8.jsonl. By default read eval_history.jsonl."
+        ),
+    )
 
     cmt_scores = commands.add_parser(
         "plot-cmt-scores",
@@ -419,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
             cmt_output=args.cmt_output,
             grpo_output=args.grpo_output,
             iw_output=args.iw_output,
+            evaluation_metric=args.evaluation_metric,
         )
     elif args.command == "plot-cmt-scores":
         result = plot_cmt_score_distributions(

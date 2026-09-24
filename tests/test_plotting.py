@@ -109,6 +109,44 @@ class PlottingTests(unittest.TestCase):
             self.assertEqual(paths["metric"], "accuracy")
             self.assertTrue(Path(paths["accuracy_over_steps"]).is_file())
 
+    def test_metric_specific_pass8_histories_can_span_different_roots(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            opd_output = Path(first) / "external_opd"
+            cmt_output = Path(second) / "analysis_cmt"
+            self._write_training_output(opd_output, 0.4, base_accuracy=0.3)
+            self._write_training_output(cmt_output, 0.5, base_accuracy=0.3)
+            for output in (opd_output, cmt_output):
+                rows = [
+                    json.loads(line)
+                    for line in (output / "eval_history.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ]
+                for row in rows:
+                    row["parameters"] = {
+                        "metric": "pass@8",
+                        "num_responses": 8,
+                    }
+                    for result in row["benchmarks"].values():
+                        result["metric"] = "pass@8"
+                        result["samples_per_problem"] = 8
+                        result["pass_at_8"] = result["accuracy"]
+                (output / "eval_history_pass_at_8.jsonl").write_text(
+                    "".join(json.dumps(row) + "\n" for row in rows),
+                    encoding="utf-8",
+                )
+
+            paths = plot_training_progress(
+                Path(first) / "results",
+                opd_output=opd_output,
+                cmt_output=cmt_output,
+                methods=["opd", "cmt"],
+                evaluation_metric="pass@8",
+            )
+
+            self.assertEqual(paths["metric"], "pass@8")
+            self.assertTrue(Path(paths["accuracy_over_steps"]).is_file())
+
     @staticmethod
     def _write_training_output(
         output: Path,

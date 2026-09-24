@@ -55,12 +55,21 @@ if [[ "${#SELECTED_METHODS[@]}" -eq 0 ]]; then
 fi
 
 PLOT_ARGS=(--methods "${SELECTED_METHODS[@]}")
+PLOT_EVAL_METRIC="${PLOT_EVAL_METRIC:-}"
+if [[ -n "${PLOT_EVAL_METRIC}" ]]; then
+  PLOT_HISTORY_SLUG="${PLOT_EVAL_METRIC//@/_at_}"
+  PLOT_HISTORY_SLUG="${PLOT_HISTORY_SLUG//-/_}"
+  PLOT_HISTORY_FILE="eval_history_${PLOT_HISTORY_SLUG}.jsonl"
+  PLOT_ARGS+=(--evaluation-metric "${PLOT_EVAL_METRIC}")
+else
+  PLOT_HISTORY_FILE="eval_history.jsonl"
+fi
 RUN_NAMES=()
 METHOD_LABELS=()
 for selected in "${SELECTED_METHODS[@]}"; do
   case "${selected}" in
     opd)
-      require_file "${OPD_RUN_OUTPUT}/eval_history.jsonl"
+      require_file "${OPD_RUN_OUTPUT}/${PLOT_HISTORY_FILE}"
       PLOT_ARGS+=(--opd-output "${OPD_RUN_OUTPUT}")
       RUN_NAMES+=("${OPD_RUN_NAME}")
       METHOD_LABELS+=("OPD")
@@ -69,7 +78,7 @@ for selected in "${SELECTED_METHODS[@]}"; do
       fi
       ;;
     ta)
-      require_file "${TA_RUN_OUTPUT}/eval_history.jsonl"
+      require_file "${TA_RUN_OUTPUT}/${PLOT_HISTORY_FILE}"
       PLOT_ARGS+=(--ta-output "${TA_RUN_OUTPUT}")
       RUN_NAMES+=("${TA_RUN_NAME}")
       METHOD_LABELS+=("TA-OPD")
@@ -78,7 +87,7 @@ for selected in "${SELECTED_METHODS[@]}"; do
       fi
       ;;
     rac)
-      require_file "${RAC_RUN_OUTPUT}/eval_history.jsonl"
+      require_file "${RAC_RUN_OUTPUT}/${PLOT_HISTORY_FILE}"
       PLOT_ARGS+=(--rac-output "${RAC_RUN_OUTPUT}")
       RUN_NAMES+=("${RAC_RUN_NAME}")
       METHOD_LABELS+=("Bellman-RAC")
@@ -87,7 +96,7 @@ for selected in "${SELECTED_METHODS[@]}"; do
       fi
       ;;
     pgt)
-      require_file "${PGT_RUN_OUTPUT}/eval_history.jsonl"
+      require_file "${PGT_RUN_OUTPUT}/${PLOT_HISTORY_FILE}"
       PLOT_ARGS+=(--pgt-output "${PGT_RUN_OUTPUT}")
       RUN_NAMES+=("${PGT_RUN_NAME}")
       METHOD_LABELS+=("PGT")
@@ -96,7 +105,7 @@ for selected in "${SELECTED_METHODS[@]}"; do
       fi
       ;;
     cmt)
-      require_file "${CMT_RUN_OUTPUT}/eval_history.jsonl"
+      require_file "${CMT_RUN_OUTPUT}/${PLOT_HISTORY_FILE}"
       PLOT_ARGS+=(--cmt-output "${CMT_RUN_OUTPUT}")
       RUN_NAMES+=("${CMT_RUN_NAME}")
       METHOD_LABELS+=("CMT-OPD")
@@ -105,7 +114,7 @@ for selected in "${SELECTED_METHODS[@]}"; do
       fi
       ;;
     grpo)
-      require_file "${GRPO_RUN_OUTPUT}/eval_history.jsonl"
+      require_file "${GRPO_RUN_OUTPUT}/${PLOT_HISTORY_FILE}"
       PLOT_ARGS+=(--grpo-output "${GRPO_RUN_OUTPUT}")
       RUN_NAMES+=("${GRPO_RUN_NAME}")
       METHOD_LABELS+=("GRPO")
@@ -114,7 +123,7 @@ for selected in "${SELECTED_METHODS[@]}"; do
       fi
       ;;
     iw)
-      require_file "${IW_RUN_OUTPUT}/eval_history.jsonl"
+      require_file "${IW_RUN_OUTPUT}/${PLOT_HISTORY_FILE}"
       PLOT_ARGS+=(--iw-output "${IW_RUN_OUTPUT}")
       RUN_NAMES+=("${IW_RUN_NAME}")
       METHOD_LABELS+=("IW-OPD")
@@ -137,6 +146,7 @@ if [[ -z "${RESULTS_DIR:-}" ]]; then
   fi
 fi
 echo "Plotting methods: ${METHOD_LABELS[*]}"
+echo "Evaluation history: ${PLOT_HISTORY_FILE}"
 echo "Results directory: ${RUN_RESULTS_DIR}"
 cd "${REPO_DIR}"
 exec "${PYTHON_BIN}" -m b200_experiment.cli plot-training-progress \
