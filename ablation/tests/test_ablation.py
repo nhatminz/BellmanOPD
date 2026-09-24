@@ -6,8 +6,11 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from b200_experiment.selectors.cmt_selector import CMTSelector, kl_constrained_allocation
-from b200_experiment.selectors.pgt_selector import PGTOutput
+from b200_experiment.selectors.cmt_selector import (  # noqa: E402
+    CMTSelector,
+    kl_constrained_allocation,
+)
+from b200_experiment.selectors.pgt_selector import PGTOutput  # noqa: E402
 
 
 def _input():
@@ -40,7 +43,7 @@ def _input():
     ), torch.tensor([[1, 1]]), torch.ones(shape, dtype=torch.bool)
 
 
-@pytest.mark.parametrize("arm", ["g", "g_x", "g_d"])
+@pytest.mark.parametrize("arm", ["g", "g_x", "g_d", "d_only"])
 def test_ablation_arm_uses_documented_cmt_quantity(arm):
     base, sampled, valid = _input()
     canonical = CMTSelector().compute_scores(base, sampled, valid)
@@ -49,9 +52,19 @@ def test_ablation_arm_uses_documented_cmt_quantity(arm):
         expected = canonical.diagnostics["gain"]
     elif arm == "g_x":
         expected = canonical.diagnostics["gain"] + canonical.diagnostics["successor_excess"]
+    elif arm == "d_only":
+        expected = canonical.diagnostics["sequential_gain"]
     else:
         expected = canonical.scores
     assert torch.allclose(result.scores, expected)
+
+
+def test_d_only_excludes_local_gain_even_when_it_is_nonzero():
+    base, sampled, valid = _input()
+    result = CMTSelector(ablation_arm="d_only").compute_scores(base, sampled, valid)
+    assert torch.equal(result.scores, result.diagnostics["sequential_gain"])
+    assert torch.equal(result.diagnostics["s_CMT"], result.scores)
+    assert not torch.equal(result.scores, result.diagnostics["gain"] + result.scores)
 
 
 def test_gd_is_exact_canonical_cmt():

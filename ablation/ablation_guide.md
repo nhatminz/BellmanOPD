@@ -4,7 +4,7 @@ Thư mục này là lớp thí nghiệm bao quanh implementation CMT chính củ
 BellmanOPD. Ablation không copy lại công thức và không thay distillation loss,
 optimizer, rollout, Gibbs/KL allocator hay evaluator.
 
-## 1. Ba arm và pipeline
+## 1. Các arm và pipeline
 
 CMT production đã tính các tensor detached `gain`, `successor_excess`,
 `sequential_gain` và `learning_value`. Ablation chỉ chọn score đưa vào cùng
@@ -14,12 +14,19 @@ allocator:
 g       : S_t = g_t
 g_x     : S_t = g_t + successor_excess_t
 g_d     : S_t = learning_value_t = g_t + sequential_gain_t
+d_only  : S_t = D_t = sequential_gain_t
 ```
 
-Trong cả ba arm, `g_t` đi qua chính call path CMT production và được tính trên
+Trong các arm có local gain, `g_t` đi qua chính call path CMT production và được tính trên
 **Student Top-K**. Teacher chỉ được gather trên các Student Top-K ID cho local
 gain. Union Student/Teacher Top-K chỉ còn dùng cho sequential accessibility;
 không có implementation `g_t` riêng trong thư mục ablation.
+
+Arm `d_only` vẫn tính toàn bộ CMT intermediates như production, nhưng loại
+`g_t` khỏi score cuối: trước correction, `L_t=D_t`; sau rollout-global
+`tanh_q99`, score đưa vào allocator là
+`kappa*tanh(D_t/kappa)`. Direct bounded Gibbs sau đó phân bổ weight từ chính
+score này. Không có bước nào cộng `g_t` trở lại.
 
 `g_d` dùng trực tiếp canonical `learning_value`, vì vậy phải trùng số với CMT
 canonical khi cấu hình giống nhau. `X=successor_excess` không phải `R`, `M`,
@@ -82,7 +89,43 @@ là protocol chính để estimator CMT có diễn giải on-policy chính xác.
 ```bash
 bash ablation/scripts/train.sh g
 bash ablation/scripts/train.sh g_x
+bash ablation/scripts/run_d_only_ablation.sh
 ```
+
+Lệnh `run_d_only_ablation.sh` khóa bắt buộc
+`CMT_CORRECTION_MODE=tanh_q99` và
+`CMT_ALLOCATION_MODE=direct_bounded_gibbs`; nếu shell truyền mode khác, launcher
+dừng với lỗi thay vì âm thầm chạy sai ablation. Có thể chạy trực tiếp arm tương
+đương bằng `bash ablation/scripts/train.sh d_only` khi không override hai mode.
+
+Ví dụ chạy D-only trên 4 GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+NUM_EPOCHS=3 \
+  bash ablation/scripts/run_d_only_ablation.sh
+```
+
+Với DAPO-Math:
+
+```bash
+TRAIN_DATASET=dapo_math CUDA_VISIBLE_DEVICES=0,1,2,3 \
+NUM_EPOCHS=2 \
+  bash ablation/scripts/run_d_only_ablation.sh
+```
+
+Vẽ cùng các arm khác sau khi đã có run name:
+
+```bash
+PLOT_MODE=arms \
+RUN_NAMES="<G_RUN> <GX_RUN> <D_ONLY_RUN>" \
+GD_CMT_RUN_NAME="<CMT_PRODUCTION_RUN>" \
+  bash ablation/scripts/plot_ablation.sh
+```
+
+Plotter nhận `d_only` như một curve riêng nhưng vẫn giữ nguyên quy tắc căn base
+cũ chỉ dành cho bộ ba `g`, `g_x`, `g_d`; việc thêm D-only không thay đổi các
+hình ablation cũ.
 
 `g_d` chính là score canonical của CMT production (`learning_value`). Vì vậy,
 nếu đã có một run CMT với cùng student/teacher, seed, rollout, `top_k`,
@@ -106,6 +149,7 @@ Output nằm trong `ablation/outputs/<run-name>/` và không bị ghi đè. Smok
 ```bash
 MAX_STEPS=2 bash ablation/scripts/train.sh g
 MAX_STEPS=2 bash ablation/scripts/train.sh g_x
+MAX_STEPS=2 bash ablation/scripts/run_d_only_ablation.sh
 ```
 
 Liệt kê các run để lấy tên tự động cho bước plotting:

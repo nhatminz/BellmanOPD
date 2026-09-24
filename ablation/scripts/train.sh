@@ -7,8 +7,8 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 ARM="${1:-}"
-if [[ "${ARM}" != "g" && "${ARM}" != "g_x" && "${ARM}" != "g_d" ]]; then
-  echo "Usage: $0 g|g_x|g_d [extra train CLI arguments...]" >&2
+if [[ "${ARM}" != "g" && "${ARM}" != "g_x" && "${ARM}" != "g_d" && "${ARM}" != "d_only" ]]; then
+  echo "Usage: $0 g|g_x|g_d|d_only [extra train CLI arguments...]" >&2
   exit 2
 fi
 shift || true
@@ -44,6 +44,16 @@ export CMT_CORRECTION_QUANTILE="${CMT_CORRECTION_QUANTILE:-0.99}"
 export CMT_FINAL_ALLOCATION_KL="${CMT_FINAL_ALLOCATION_KL:-0.02}"
 export CMT_GAMMA="${CMT_GAMMA:-1.0}"
 export CMT_SUCCESSOR_LAMBDA="${CMT_SUCCESSOR_LAMBDA:-1.0}"
+if [[ "${ARM}" == "d_only" ]]; then
+  if [[ "${CMT_CORRECTION_MODE}" != "tanh_q99" ]]; then
+    echo "d_only requires CMT_CORRECTION_MODE=tanh_q99" >&2
+    exit 2
+  fi
+  if [[ "${CMT_ALLOCATION_MODE}" != "direct_bounded_gibbs" ]]; then
+    echo "d_only requires CMT_ALLOCATION_MODE=direct_bounded_gibbs" >&2
+    exit 2
+  fi
+fi
 export ROLLOUT_TEMPERATURE="${ROLLOUT_TEMPERATURE:-1.0}"
 export ROLLOUT_TOP_P="${ROLLOUT_TOP_P:-1.0}"
 # Training and evaluation budgets intentionally remain independent.

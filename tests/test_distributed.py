@@ -32,12 +32,14 @@ from b200_experiment.selectors.cmt_selector import (
     robust_cmt_correction,
 )
 from b200_experiment.trainer import (
+    _apply_global_cmt_correction,
     _globalize_ta_output,
     _local_mask_from_global_budget,
     _opd_train_step,
     _optimizer_steps_per_epoch,
     _rollout_position_after_optimizer_steps,
 )
+from b200_experiment.selectors.base import SelectorOutput
 from b200_experiment.opd_core import (
     build_topk_opd_reference,
     topk_reference_from_logits,
@@ -364,6 +366,45 @@ def _robust_direct_cmt_global_worker(
 
 
 class DistributedInvariantTests(unittest.TestCase):
+    def test_d_only_global_correction_uses_tanh_d_without_gain(self):
+        gain = torch.tensor([0.5, 1.0, 2.0, 4.0])
+        raw_d = torch.tensor([-8.0, -0.5, 0.5, 8.0])
+        valid = torch.ones((1, 4), dtype=torch.bool)
+        local = SelectorOutput(
+            raw_d.reshape(1, 4),
+            {
+                "ablation_arm": "d_only",
+                "s_CMT": raw_d.reshape(1, 4),
+            },
+        )
+        global_diagnostics = {
+            "gain": gain.clone(),
+            "sequential_gain_raw": raw_d.clone(),
+            "s_CMT": raw_d.clone(),
+        }
+        corrected, global_corrected, _ = _apply_global_cmt_correction(
+            local,
+            global_diagnostics,
+            valid,
+            0,
+            4,
+            mode="tanh_q99",
+            quantile=0.99,
+        )
+        expected_d, canonical_g_plus_d, _, _ = robust_cmt_correction(
+            gain, raw_d, mode="tanh_q99", quantile=0.99
+        )
+        self.assertTrue(torch.allclose(corrected.scores.reshape(-1), expected_d))
+        self.assertTrue(
+            torch.allclose(global_corrected["allocation_score"], expected_d)
+        )
+        self.assertTrue(
+            torch.allclose(global_corrected["learning_value_raw"], raw_d)
+        )
+        self.assertFalse(
+            torch.allclose(corrected.scores.reshape(-1), canonical_g_plus_d)
+        )
+
     def test_cmt_correction_and_direct_allocation_are_global(self):
         if not dist.is_gloo_available():
             self.skipTest("PyTorch was built without Gloo")

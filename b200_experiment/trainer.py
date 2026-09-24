@@ -479,15 +479,25 @@ def _apply_global_cmt_correction(
         mode=mode,
         quantile=quantile,
     )
-    raw_value = global_diagnostics["gain"] + global_diagnostics["sequential_gain_raw"]
-    kappa_values = torch.full_like(robust_value, float(kappa))
+    ablation_arm = str(local.diagnostics.get("ablation_arm", "canonical"))
+    d_only = ablation_arm == "d_only"
+    raw_value = (
+        global_diagnostics["sequential_gain_raw"]
+        if d_only
+        else global_diagnostics["gain"]
+        + global_diagnostics["sequential_gain_raw"]
+    )
+    corrected_value = robust_d if d_only else robust_value
+    kappa_values = torch.full_like(corrected_value, float(kappa))
     if mode == "none":
         # Preserve every legacy/ablation score exactly in the default mode.
         global_allocation_score = global_diagnostics["s_CMT"]
         local_allocation_score = local.scores
     else:
-        global_allocation_score = robust_value
-        local_allocation_score = scatter_valid(robust_value[start:end], valid_mask)
+        global_allocation_score = corrected_value
+        local_allocation_score = scatter_valid(
+            corrected_value[start:end], valid_mask
+        )
     diagnostics = dict(local.diagnostics)
     diagnostics.update(
         sequential_gain_raw=scatter_valid(
@@ -496,7 +506,9 @@ def _apply_global_cmt_correction(
         learning_value_raw=scatter_valid(raw_value[start:end], valid_mask),
         correction_kappa=scatter_valid(kappa_values[start:end], valid_mask),
         sequential_gain_robust=scatter_valid(robust_d[start:end], valid_mask),
-        learning_value_robust=scatter_valid(robust_value[start:end], valid_mask),
+        learning_value_robust=scatter_valid(
+            corrected_value[start:end], valid_mask
+        ),
         allocation_score=local_allocation_score,
         correction_mode=mode,
         correction_quantile=float(quantile),
@@ -509,7 +521,7 @@ def _apply_global_cmt_correction(
         learning_value_raw=raw_value,
         correction_kappa=kappa_values,
         sequential_gain_robust=robust_d,
-        learning_value_robust=robust_value,
+        learning_value_robust=corrected_value,
         allocation_score=global_allocation_score,
         s_CMT=global_allocation_score,
     )

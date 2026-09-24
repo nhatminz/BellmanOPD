@@ -22,8 +22,14 @@ BENCHMARK_ORDER = (
     "GPQA-Diamond",
     "AMC23",
 )
-ARMS = ("g", "g_x", "g_d")
-COLORS = {"g": "tab:blue", "g_x": "tab:orange", "g_d": "tab:purple"}
+ARMS = ("g", "g_x", "g_d", "d_only")
+BASE_ALIGNMENT_ARMS = ("g", "g_x", "g_d")
+COLORS = {
+    "g": "tab:blue",
+    "g_x": "tab:orange",
+    "g_d": "tab:purple",
+    "d_only": "tab:red",
+}
 
 
 def _normalise_name(value: str) -> str:
@@ -202,7 +208,10 @@ def _align_arm_bases(grouped):
             copied[arm] = list(values)
 
         bases = {}
-        for arm in ARMS:
+        # Preserve the project's established asymmetric alignment for the
+        # original three-arm figure. D-only is an additional curve and must
+        # not disable or alter that existing display transform.
+        for arm in BASE_ALIGNMENT_ARMS:
             base_values = [
                 float(value)
                 for step, value in by_arm.get(arm, [])
@@ -215,12 +224,12 @@ def _align_arm_bases(grouped):
                 break
             bases[arm] = sum(base_values) / len(base_values)
 
-        if len(bases) != len(ARMS):
+        if len(bases) != len(BASE_ALIGNMENT_ARMS):
             aligned[benchmark] = copied
             continue
 
         target = max(bases.values())
-        for arm in ARMS:
+        for arm in BASE_ALIGNMENT_ARMS:
             values = by_arm.get(arm, [])
             if arm == "g_d" and target > bases[arm]:
                 delta = target - bases[arm]

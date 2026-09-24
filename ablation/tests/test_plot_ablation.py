@@ -35,7 +35,7 @@ def _write_run(root: Path, arm: str) -> None:
 
 
 def test_default_arm_plot_uses_all_six_benchmarks(tmp_path, monkeypatch):
-    for arm in ("g", "g_x", "g_d"):
+    for arm in ("g", "g_x", "g_d", "d_only"):
         _write_run(tmp_path, arm)
     output = tmp_path / "figures"
     monkeypatch.setattr(
@@ -124,6 +124,7 @@ def test_base_alignment_shifts_only_gd_trajectory_when_gd_is_low():
             "g": [(0, 0.50), (10, 0.60)],
             "g_x": [(0, 0.40), (10, 0.70)],
             "g_d": [(0, 0.30), (10, 0.35)],
+            "d_only": [(0, 0.20), (10, 0.80)],
         }
     }
     aligned = _align_arm_bases(grouped)["MATH-500"]
@@ -135,6 +136,7 @@ def test_base_alignment_shifts_only_gd_trajectory_when_gd_is_low():
     assert aligned["g_x"][0] == (0, 0.50)
     assert aligned["g_x"][1] == (10, 0.70)
     assert aligned["g_d"] == [(0, 0.50), (10, 0.55)]
+    assert aligned["d_only"] == [(0, 0.20), (10, 0.80)]
 
 
 def test_base_alignment_only_changes_g_and_gx_bases_when_gd_is_high():

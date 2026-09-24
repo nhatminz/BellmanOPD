@@ -85,6 +85,47 @@ def test_g_arm_dry_run_records_student_topk_gain_support():
         assert spec["cmt_allocation_mode"] == "direct_bounded_gibbs"
 
 
+def test_d_only_launcher_locks_robust_correction_and_direct_allocation():
+    import json
+
+    with tempfile.TemporaryDirectory() as temp:
+        output = Path(temp) / "d-only"
+        env = dict(os.environ, ABLATION_DRY_RUN="true", OUTPUT_DIR=str(output))
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts/run_d_only_ablation.sh")],
+            cwd="/tmp",
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        spec = json.loads(
+            (output / "ablation_spec.json").read_text(encoding="utf-8")
+        )
+        assert spec["arm"] == "d_only"
+        assert spec["cmt_correction_mode"] == "tanh_q99"
+        assert spec["cmt_allocation_mode"] == "direct_bounded_gibbs"
+        assert "CMT ablation arm: d_only" in result.stdout
+
+
+def test_d_only_rejects_noncanonical_correction_mode():
+    with tempfile.TemporaryDirectory() as temp:
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts/run_d_only_ablation.sh")],
+            cwd="/tmp",
+            env={
+                **os.environ,
+                "ABLATION_DRY_RUN": "true",
+                "OUTPUT_DIR": str(Path(temp) / "invalid"),
+                "CMT_CORRECTION_MODE": "none",
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "requires CMT_CORRECTION_MODE=tanh_q99" in result.stderr
+
+
 def test_topk_ablation_resolves_multiple_student_topk_values():
     import json
 
