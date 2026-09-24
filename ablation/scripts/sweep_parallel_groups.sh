@@ -63,7 +63,7 @@ for index in "${!values_array[@]}"; do
     echo "Empty GPU group at index ${index}" >&2
     exit 1
   fi
-  run_name="analysis_${PREFIX}_${value}_seed${SEED:-42}_${tag}"
+  run_name="${RUN_NAME_PREFIX:-analysis}_${PREFIX}_${value}_seed${SEED:-42}_${tag}"
   names+=("${run_name}")
   child_command=(bash "${SCRIPT_DIR}/train.sh" g_d)
   if [[ "${stream_logs,,}" == "true" || "${stream_logs}" == "1" || "${stream_logs,,}" == "yes" ]]; then

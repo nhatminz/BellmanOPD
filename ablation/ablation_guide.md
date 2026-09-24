@@ -186,6 +186,18 @@ Thứ tự ánh xạ là `0.0 -> GPU 0,1`, `0.005 -> GPU 2,3`,
 một epoch, `tanh_q99` và `direct_bounded_gibbs`; trong mỗi job,
 `TRAIN_NPROC_PER_NODE=2` được suy ra tự động từ kích thước nhóm GPU.
 
+Với cặp Qwen3-14B teacher -> Qwen3-4B student, dùng wrapper 4B. Wrapper này
+chỉ đặt model pair rồi gọi lại launcher chuẩn, nên hỗ trợ đầy đủ
+`final_allocation_kl` và không phụ thuộc vào bản copy
+`sweep_parallel_groups_4b.sh`:
+
+```bash
+GPU_GROUPS="0,1;2,3;4,5;6,7" \
+FINAL_KL_RUN_MODE=parallel_groups \
+FINAL_ALLOCATION_KL_VALUES="0.01 0.02 0.05 0.1" \
+  bash ablation/scripts/run_final_allocation_kl_ablation_4b.sh
+```
+
 Vẽ kết quả sau khi thay đúng bốn run name đã sinh:
 
 ```bash
