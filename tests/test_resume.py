@@ -297,9 +297,14 @@ class ResumeTests(unittest.TestCase):
                 "".join(json.dumps({"step": step}) + "\n" for step in (0, 100, 120)),
                 encoding="utf-8",
             )
+            (root / "eval_history_pass_at_8.jsonl").write_text(
+                "".join(json.dumps({"step": step}) + "\n" for step in (0, 100, 120)),
+                encoding="utf-8",
+            )
             for filename, steps in (
                 ("train_metrics.csv", (99, 100, 101, 127)),
                 ("eval_metrics.csv", (0, 100, 120)),
+                ("eval_metrics_pass_at_8.csv", (0, 100, 120)),
             ):
                 with (root / filename).open(
                     "w", newline="", encoding="utf-8"
@@ -345,9 +350,16 @@ class ResumeTests(unittest.TestCase):
                 self.assertEqual(
                     [json.loads(line)["step"] for line in handle], [0, 100]
                 )
+            with (root / "eval_history_pass_at_8.jsonl").open(
+                encoding="utf-8"
+            ) as handle:
+                self.assertEqual(
+                    [json.loads(line)["step"] for line in handle], [0, 100]
+                )
             for filename, expected in (
                 ("train_metrics.csv", [99, 100]),
                 ("eval_metrics.csv", [0, 100]),
+                ("eval_metrics_pass_at_8.csv", [0, 100]),
             ):
                 with (root / filename).open(newline="", encoding="utf-8") as handle:
                     self.assertEqual(

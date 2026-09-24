@@ -1578,38 +1578,100 @@ def _run_training_evaluation(
             "metric", evaluation_metric_name(samples_per_problem)
         )
     )
-    history_entry = {
-        "step": step,
-        "max_steps": max_steps,
-        "method": method,
-        "model_role": "base_student" if step == 0 else method,
-        "backend": backend,
-        "evaluation_time": elapsed,
-        "base_cache_status": cache_status if step == 0 else None,
-        "benchmarks": {
-            name: {
+
+    def history_for(history_metric: str) -> dict[str, Any]:
+        benchmarks: dict[str, dict[str, Any]] = {}
+        for name, result in suite["benchmarks"].items():
+            if history_metric == "avg@8":
+                selected_score = float(result["avg_at_8"])
+            elif history_metric == "pass@8":
+                selected_score = float(result["pass_at_8"])
+            else:
+                selected_score = float(result["accuracy"])
+            benchmarks[name] = {
                 "correct": result["correct"],
                 "total": result["total"],
-                "accuracy": result["accuracy"],
-                "avg_at_n": result.get("avg_at_n", result["accuracy"]),
-                **({"avg_at_8": result["avg_at_8"]} if "avg_at_8" in result else {}),
-                **({"pass_at_k": result["pass_at_k"]} if "pass_at_k" in result else {}),
-                **({"pass_at_8": result["pass_at_8"]} if "pass_at_8" in result else {}),
+                # ``accuracy`` remains the selected score for compatibility
+                # with plotting and legacy history readers.
+                "accuracy": selected_score,
+                "avg_at_n": selected_score,
+                **(
+                    {"avg_at_8": result["avg_at_8"]}
+                    if "avg_at_8" in result
+                    else {}
+                ),
+                **(
+                    {
+                        "pass_at_k": (
+                            result["pass_at_8"]
+                            if history_metric == "pass@8"
+                            else result["pass_at_k"]
+                        )
+                    }
+                    if history_metric == "pass@8" or "pass_at_k" in result
+                    else {}
+                ),
+                **(
+                    {"pass_at_8": result["pass_at_8"]}
+                    if "pass_at_8" in result
+                    else {}
+                ),
                 "problems": result.get("problems"),
                 "samples_per_problem": result.get(
                     "samples_per_problem", samples_per_problem
                 ),
-                "metric": metric_name,
+                "metric": history_metric,
             }
-            for name, result in suite["benchmarks"].items()
-        },
-        "parameters": suite["parameters"],
-        "details": str((step_dir / "summary.json").resolve()),
+        return {
+            "step": step,
+            "max_steps": max_steps,
+            "method": method,
+            "model_role": "base_student" if step == 0 else method,
+            "backend": backend,
+            "evaluation_time": elapsed,
+            "base_cache_status": cache_status if step == 0 else None,
+            "benchmarks": benchmarks,
+            "parameters": {**suite["parameters"], "metric": history_metric},
+            "details": str((step_dir / "summary.json").resolve()),
+        }
+
+    dual_metric_evaluation = metric_name in {"avg@8", "pass@8"} and all(
+        "avg_at_8" in result and "pass_at_8" in result
+        for result in suite["benchmarks"].values()
+    )
+    if dual_metric_evaluation:
+        history_artifacts = (
+            (
+                "avg@8",
+                output_dir / "eval_history.jsonl",
+                output_dir / "eval_metrics.csv",
+            ),
+            (
+                "pass@8",
+                output_dir / "eval_history_pass_at_8.jsonl",
+                output_dir / "eval_metrics_pass_at_8.csv",
+            ),
+        )
+    else:
+        history_artifacts = (
+            (
+                metric_name,
+                output_dir / "eval_history.jsonl",
+                output_dir / "eval_metrics.csv",
+            ),
+        )
+
+    history_entries = {
+        history_metric: history_for(history_metric)
+        for history_metric, _, _ in history_artifacts
     }
     if distributed is None or distributed.is_main:
-        _upsert_jsonl_row(
-            output_dir / "eval_history.jsonl", history_entry, ("step", "method")
-        )
+        for history_metric, history_path, _ in history_artifacts:
+            _upsert_jsonl_row(
+                history_path,
+                history_entries[history_metric],
+                ("step", "method"),
+            )
     eval_metric_fields = (
         "step",
         "method",
@@ -1628,21 +1690,30 @@ def _run_training_evaluation(
         "evaluation_time_sec",
     )
     if distributed is None or distributed.is_main:
-        for benchmark, result in history_entry["benchmarks"].items():
-            _upsert_csv_row(
-                output_dir / "eval_metrics.csv",
-                {
-                    "step": step,
-                    "method": method,
-                    "backend": backend,
-                    "benchmark": benchmark,
-                    **result,
-                    "evaluation_time_sec": elapsed,
-                },
-                eval_metric_fields,
-                ("step", "method", "benchmark"),
+        for history_metric, _, metrics_path in history_artifacts:
+            history_entry = history_entries[history_metric]
+            for benchmark, result in history_entry["benchmarks"].items():
+                _upsert_csv_row(
+                    metrics_path,
+                    {
+                        "step": step,
+                        "method": method,
+                        "backend": backend,
+                        "benchmark": benchmark,
+                        **result,
+                        "evaluation_time_sec": elapsed,
+                    },
+                    eval_metric_fields,
+                    ("step", "method", "benchmark"),
+                )
+        if dual_metric_evaluation:
+            tqdm.write(
+                "Training evaluation reused one 8-response generation set for "
+                "avg@8 and pass@8 histories."
             )
-    return history_entry
+    if metric_name in history_entries:
+        return history_entries[metric_name]
+    return next(iter(history_entries.values()))
 
 
 def _make_optimizer(parameters, training: dict[str, Any]):
@@ -3220,6 +3291,12 @@ def _run_grpo_training(
         "selector_score_dir": None,
         "evaluation_history": str((output_dir / "eval_history.jsonl").resolve())
         if bool(training_eval_settings.get("enabled", False))
+        else None,
+        "evaluation_history_pass_at_8": str(
+            (output_dir / "eval_history_pass_at_8.jsonl").resolve()
+        )
+        if bool(training_eval_settings.get("enabled", False))
+        and int(training_eval_settings.get("num_responses", 8)) == 8
         else None,
         "initial_evaluation": initial_evaluation,
     }
@@ -5254,6 +5331,12 @@ def run_training(
         "token_score_stats_dir": str((output_dir / "token_score_stats").resolve()),
         "evaluation_history": str((output_dir / "eval_history.jsonl").resolve())
         if bool(training_eval_settings.get("enabled", False))
+        else None,
+        "evaluation_history_pass_at_8": str(
+            (output_dir / "eval_history_pass_at_8.jsonl").resolve()
+        )
+        if bool(training_eval_settings.get("enabled", False))
+        and int(training_eval_settings.get("num_responses", 8)) == 8
         else None,
         "initial_evaluation": initial_evaluation,
     }

@@ -349,11 +349,23 @@ IW hỗ trợ cùng preset dữ liệu với các method khác: `competition_mat
 `dapo_math`/`dapo` (DAPO-Math-17k-Processed). Có thể dùng `TRAIN_DATASET=custom` cùng
 `TRAIN_DATA_PATH`, `TRAIN_PROMPT_KEY` và tùy chọn `TRAIN_DATA_SPLIT` cho dữ liệu riêng.
 
+Với mặc định `TRAIN_EVAL_NUM_RESPONSES=8`, mỗi periodic evaluation chỉ generate
+một tập 8 responses/problem rồi tính đồng thời `avg@8` và `pass@8` từ cùng vector
+đúng/sai. Kết quả được upsert riêng vào:
+
+- `eval_history.jsonl` và `eval_metrics.csv` cho `avg@8`;
+- `eval_history_pass_at_8.jsonl` và `eval_metrics_pass_at_8.csv` cho `pass@8`.
+
+Không có lần inference thứ hai. `training_eval/step-*` chứa một bộ raw responses,
+prediction và summary duy nhất, trong đó mỗi benchmark có cả `avg_at_8` và
+`pass_at_8`.
+
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 \
 IW_RUN_NAME="${IW_RUN_NAME}" \
 BATCH_SIZE=64 PPO_MINI_BATCH_SIZE=16 MICRO_BATCH_SIZE_PER_GPU=8 \
 LR=5e-6 MAX_RESPONSE_LEN=4096 ROLLOUT_VLLM_GPU_MEMORY_UTILIZATION=0.6 \
+TRAIN_EVAL_NUM_RESPONSES=8 TRAIN_EVAL_METRIC=avg@8 \
 bash scripts/train_iw_b200.sh
 ```
 
@@ -420,8 +432,10 @@ Nếu một rank lỗi, sentinel lỗi được phát hiện và toàn job dừn
 (mặc định 24 giờ) điều khiển timeout này. Với một GPU, pipeline cũ vẫn được giữ nguyên.
 Multi-GPU training-time evaluation yêu cầu `training_evaluation.backend=vllm`; backend `hf` vẫn
 dùng được cho single-GPU.
-Có thể ghi pass@8 ngay trong periodic evaluation bằng
-`TRAIN_EVAL_NUM_RESPONSES=8 TRAIN_EVAL_METRIC=pass@8`.
+Khi `TRAIN_EVAL_NUM_RESPONSES=8`, periodic evaluation luôn ghi đồng thời avg@8
+và pass@8 từ cùng một lần generation. `TRAIN_EVAL_METRIC` chỉ chọn metric chính
+hiển thị trong summary/TQDM; nên giữ `avg@8` để tương thích mặc định. Dual-history
+không hoạt động nếu đổi số responses khác 8.
 Các launcher `ablation/scripts/train.sh g`, `g_x` và (nếu thực sự chạy độc lập)
 `g_d` mặc định đánh giá đủ 6 benchmark: Competition-MATH, MATH-500, AIME24,
 AIME25, GPQA-Diamond và AMC23.

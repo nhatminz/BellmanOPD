@@ -130,6 +130,137 @@ def _fake_evaluator(
 
 
 class DistributedTrainingEvaluationTests(unittest.TestCase):
+    def test_eight_responses_write_avg_and_pass_histories_from_one_evaluation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            output_dir = root / "dual-metric-run"
+            settings = {
+                "backend": "vllm",
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "num_responses": 8,
+                "metric": "avg@8",
+                "batch_size": 1,
+                "max_new_tokens": 8,
+                "limit": None,
+                "benchmark_names": ["MATH-500"],
+                "vllm": {"tensor_parallel_size": 1},
+            }
+
+            def dual_evaluator(
+                _model,
+                _tokenizer,
+                model_name,
+                model_path,
+                _step,
+                _config_value,
+                _resolved_config_path,
+                step_dir,
+                runtime_settings,
+                **_kwargs,
+            ):
+                step_dir.mkdir(parents=True, exist_ok=True)
+                prediction = step_dir / "math_500_predictions.jsonl.gz"
+                rows = []
+                with gzip.open(prediction, "wt", encoding="utf-8") as handle:
+                    for index in range(5):
+                        row = {
+                            "id": str(index),
+                            "problem": f"problem-{index}",
+                            "answer": "1",
+                            "responses": ["1"] + ["0"] * 7,
+                            "correct": [True] + [False] * 7,
+                            "problem_score": 0.125,
+                            "metric_score": 0.125,
+                        }
+                        rows.append(row)
+                        handle.write(json.dumps(row) + "\n")
+                detailed = step_dir / "model_outputs_detailed.jsonl.gz"
+                with gzip.open(detailed, "wt", encoding="utf-8") as handle:
+                    for row in rows:
+                        handle.write(
+                            json.dumps(
+                                {
+                                    "benchmark": "MATH-500",
+                                    "problem_id": row["id"],
+                                    "model_name": model_name,
+                                }
+                            )
+                            + "\n"
+                        )
+                suite = {
+                    "model": model_name,
+                    "model_path": str(Path(model_path).resolve()),
+                    "benchmarks": {
+                        "MATH-500": {
+                            "correct": 5,
+                            "total": 40,
+                            "problems": 5,
+                            "samples_per_problem": 8,
+                            "avg_at_n": 0.125,
+                            "avg_at_8": 0.125,
+                            "pass_at_8": 1.0,
+                            "accuracy": 0.125,
+                            "predictions": str(prediction.resolve()),
+                            "schema": {"benchmark": "MATH-500"},
+                        }
+                    },
+                    "parameters": {
+                        "backend": "vllm",
+                        "max_new_tokens": int(runtime_settings["max_new_tokens"]),
+                        "limit": None,
+                        "do_sample": True,
+                        "temperature": 0.7,
+                        "top_p": 0.95,
+                        "num_responses": 8,
+                        "metric": "avg@8",
+                        "tensor_parallel_size": 1,
+                    },
+                    "detailed_outputs": str(detailed.resolve()),
+                }
+                (step_dir / "summary.json").write_text(
+                    json.dumps(suite) + "\n", encoding="utf-8"
+                )
+                return suite
+
+            with patch(
+                "b200_experiment.trainer._evaluate_vllm_subprocess",
+                side_effect=dual_evaluator,
+            ) as evaluator:
+                returned = _run_training_evaluation(
+                    None,
+                    None,
+                    "iw",
+                    1,
+                    10,
+                    {
+                        **config,
+                        "training_evaluation": {
+                            **config["training_evaluation"],
+                            **settings,
+                        },
+                    },
+                    output_dir,
+                    root / "resolved.yaml",
+                    checkpoint=root,
+                )
+
+            self.assertEqual(evaluator.call_count, 1)
+            self.assertEqual(returned["parameters"]["metric"], "avg@8")
+            avg_row = json.loads((output_dir / "eval_history.jsonl").read_text())
+            pass_row = json.loads(
+                (output_dir / "eval_history_pass_at_8.jsonl").read_text()
+            )
+            self.assertEqual(avg_row["benchmarks"]["MATH-500"]["accuracy"], 0.125)
+            self.assertEqual(avg_row["benchmarks"]["MATH-500"]["metric"], "avg@8")
+            self.assertEqual(pass_row["benchmarks"]["MATH-500"]["accuracy"], 1.0)
+            self.assertEqual(
+                pass_row["benchmarks"]["MATH-500"]["metric"], "pass@8"
+            )
+            self.assertTrue((output_dir / "eval_metrics.csv").is_file())
+            self.assertTrue((output_dir / "eval_metrics_pass_at_8.csv").is_file())
+
     def test_single_gpu_path_keeps_root_evaluation_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

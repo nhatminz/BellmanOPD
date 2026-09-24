@@ -174,6 +174,27 @@ def metric_problem_score(correctness: list[bool], metric_name: str) -> float:
     return 1.0 - math.comb(n - correct, k) / math.comb(n, k)
 
 
+def evaluation_problem_scores(
+    correctness: list[bool], metric_name: str
+) -> dict[str, float]:
+    """Compute every metric that is identifiable from one response set.
+
+    ``avg@8`` and ``pass@8`` are two summaries of the same eight Bernoulli
+    grades; they do not require independent generations.  Keep the requested
+    metric as ``selected`` for backward-compatible summaries, while always
+    exposing both canonical eight-sample metrics when exactly eight responses
+    were generated.
+    """
+    scores = {
+        "selected": metric_problem_score(correctness, metric_name),
+        "average": metric_problem_score(correctness, f"avg@{len(correctness)}"),
+    }
+    if len(correctness) == 8:
+        scores["avg@8"] = scores["average"]
+        scores["pass@8"] = metric_problem_score(correctness, "pass@8")
+    return scores
+
+
 def detailed_model_output_record(
     *,
     model_name: str,
@@ -808,6 +829,8 @@ def evaluate_loaded_suite(
             records, schema = loaded[benchmark]
             correct_generations = graded_generations = problems = 0
             problem_score_sum = 0.0
+            avg_at_8_sum = 0.0
+            pass_at_8_sum = 0.0
             prediction_path = output_dir / (
                 f"{benchmark.lower().replace('-', '_')}_predictions.jsonl.gz"
             )
@@ -867,11 +890,13 @@ def evaluate_loaded_suite(
                         correct_generations += sum(map(int, correctness))
                         graded_generations += samples_per_problem
                         problems += 1
-                        raw_problem_score = sum(correctness) / samples_per_problem
-                        selected_problem_score = metric_problem_score(
-                            correctness, metric_name
-                        )
+                        scores = evaluation_problem_scores(correctness, metric_name)
+                        raw_problem_score = scores["average"]
+                        selected_problem_score = scores["selected"]
                         problem_score_sum += selected_problem_score
+                        if samples_per_problem == 8:
+                            avg_at_8_sum += scores["avg@8"]
+                            pass_at_8_sum += scores["pass@8"]
                         detailed_handle.write(
                             json.dumps(
                                 detailed_model_output_record(
@@ -927,10 +952,11 @@ def evaluate_loaded_suite(
             }
             if metric_name.startswith("pass@"):
                 benchmark_result["pass_at_k"] = selected_score
-                if metric_name == "pass@8":
-                    benchmark_result["pass_at_8"] = selected_score
-            elif samples_per_problem == 8:
-                benchmark_result["avg_at_8"] = selected_score
+            if samples_per_problem == 8:
+                # Both values come from the exact same eight generated
+                # responses and therefore add no model inference.
+                benchmark_result["avg_at_8"] = avg_at_8_sum / max(problems, 1)
+                benchmark_result["pass_at_8"] = pass_at_8_sum / max(problems, 1)
             suite["benchmarks"][benchmark] = benchmark_result
     finally:
         detailed_handle.close()

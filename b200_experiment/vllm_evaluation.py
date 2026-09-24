@@ -25,10 +25,10 @@ from .evaluation import (
     configured_benchmark_names,
     detailed_model_output_record,
     evaluation_metric_name,
+    evaluation_problem_scores,
     ensure_extended_benchmark_specs,
     grade_evaluation_response,
     load_benchmark,
-    metric_problem_score,
     render_evaluation_prompt,
 )
 
@@ -416,6 +416,8 @@ def _evaluate_vllm_suite_impl(
                 )
                 correct = graded = problems = 0
                 problem_score_sum = 0.0
+                avg_at_8_sum = 0.0
+                pass_at_8_sum = 0.0
                 with gzip.open(prediction_path, "wt", encoding="utf-8") as handle:
                     for row, rendered_prompt, responses in grouped[benchmark]:
                         correctness = [
@@ -425,11 +427,13 @@ def _evaluate_vllm_suite_impl(
                         correct += sum(map(int, correctness))
                         graded += samples_per_problem
                         problems += 1
-                        raw_problem_score = sum(correctness) / samples_per_problem
-                        selected_problem_score = metric_problem_score(
-                            correctness, metric_name
-                        )
+                        scores = evaluation_problem_scores(correctness, metric_name)
+                        raw_problem_score = scores["average"]
+                        selected_problem_score = scores["selected"]
                         problem_score_sum += selected_problem_score
+                        if samples_per_problem == 8:
+                            avg_at_8_sum += scores["avg@8"]
+                            pass_at_8_sum += scores["pass@8"]
                         detailed.write(
                             json.dumps(
                                 detailed_model_output_record(
@@ -481,10 +485,11 @@ def _evaluate_vllm_suite_impl(
                 }
                 if metric_name.startswith("pass@"):
                     benchmark_result["pass_at_k"] = selected_score
-                    if metric_name == "pass@8":
-                        benchmark_result["pass_at_8"] = selected_score
-                elif samples_per_problem == 8:
-                    benchmark_result["avg_at_8"] = selected_score
+                if samples_per_problem == 8:
+                    # Dual reporting reuses this exact response/correctness
+                    # set; no second vLLM generate call is made.
+                    benchmark_result["avg_at_8"] = avg_at_8_sum / max(problems, 1)
+                    benchmark_result["pass_at_8"] = pass_at_8_sum / max(problems, 1)
                 suite["benchmarks"][benchmark] = benchmark_result
     finally:
         grade_progress.close()
@@ -625,15 +630,16 @@ def merge_vllm_evaluation_shards(
         # Recompute from per-response grades instead of trusting a shard's
         # aggregate field; this is numerically identical to the single-GPU
         # evaluator and makes the merged metric auditable.
-        problem_score_sum = sum(
-            metric_problem_score(
-                list(map(bool, row["correct"])),
-                evaluation_metric_name(
-                    samples_per_problem, runtime_settings.get("metric")
-                ),
+        selected_metric = evaluation_metric_name(
+            samples_per_problem, runtime_settings.get("metric")
+        )
+        row_scores = [
+            evaluation_problem_scores(
+                list(map(bool, row["correct"])), selected_metric
             )
             for row in merged_rows
-        )
+        ]
+        problem_score_sum = sum(scores["selected"] for scores in row_scores)
         with gzip.open(prediction_path, "wt", encoding="utf-8") as handle:
             for row in merged_rows:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -649,10 +655,13 @@ def merge_vllm_evaluation_shards(
         }
         if expected_parameters["metric"].startswith("pass@"):
             result["pass_at_k"] = result["accuracy"]
-            if expected_parameters["metric"] == "pass@8":
-                result["pass_at_8"] = result["accuracy"]
-        elif samples_per_problem == 8:
-            result["avg_at_8"] = result["avg_at_n"]
+        if samples_per_problem == 8:
+            result["avg_at_8"] = sum(
+                scores["avg@8"] for scores in row_scores
+            ) / max(len(merged_rows), 1)
+            result["pass_at_8"] = sum(
+                scores["pass@8"] for scores in row_scores
+            ) / max(len(merged_rows), 1)
         merged_benchmarks[benchmark] = result
 
     detailed_rows_by_rank: list[list[dict[str, Any]]] = []

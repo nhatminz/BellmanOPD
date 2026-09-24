@@ -67,6 +67,10 @@ export TRAIN_EVAL_ENABLED="${TRAIN_EVAL_ENABLED:-true}"
 export TRAIN_EVAL_BACKEND="${TRAIN_EVAL_BACKEND:-vllm}"
 export TRAIN_EVAL_INTERVAL="${TRAIN_EVAL_INTERVAL:-100}"
 export TRAIN_EVAL_NUM_RESPONSES="${TRAIN_EVAL_NUM_RESPONSES:-8}"
+# With exactly eight responses the evaluator writes both avg@8 and pass@8
+# histories from this single generation set.  This remains the primary metric
+# used in the per-step summary; it does not trigger another inference pass.
+export TRAIN_EVAL_METRIC="${TRAIN_EVAL_METRIC:-avg@8}"
 export TRAIN_EVAL_TEMPERATURE="${TRAIN_EVAL_TEMPERATURE:-0.7}"
 export TRAIN_EVAL_TOP_P="${TRAIN_EVAL_TOP_P:-0.95}"
 export TRAIN_EVAL_MAX_NEW_TOKENS="${TRAIN_EVAL_MAX_NEW_TOKENS:-4096}"
@@ -93,6 +97,11 @@ echo "IW-OPD run: ${RUN_NAME}"
 echo "IW-OPD output: ${OUTPUT_DIR}"
 echo "IW-OPD settings: dataset=${TRAIN_DATASET}, data=${TRAIN_DATA}, split=${TRAIN_DATA_SPLIT}, prompt_key=${PROMPT_KEY}"
 echo "IW-OPD settings: weight_max=${IW_OPD_WEIGHT_MAX}, use_abs=${IW_OPD_WEIGHT_USE_ABS}, max_new_tokens=${MAX_RESPONSE_LEN}, lr=${LR}, global_batch=${BATCH_SIZE}, ppo_batch=${PPO_MINI_BATCH_SIZE}, micro/GPU=${MICRO_BATCH_SIZE_PER_GPU}, rollout_vllm_util=${ROLLOUT_VLLM_GPU_MEMORY_UTILIZATION}"
+if [[ "${TRAIN_EVAL_NUM_RESPONSES}" == "8" ]]; then
+  echo "IW-OPD periodic eval: one 8-response set -> avg@8 + pass@8 histories (primary=${TRAIN_EVAL_METRIC})"
+else
+  echo "IW-OPD periodic eval: ${TRAIN_EVAL_NUM_RESPONSES} responses, primary=${TRAIN_EVAL_METRIC} (dual avg@8/pass@8 requires exactly 8)"
+fi
 if [[ -n "${RESUME_FROM_CHECKPOINT}" ]]; then
   echo "Resume checkpoint: ${RESUME_FROM_CHECKPOINT}"
 fi

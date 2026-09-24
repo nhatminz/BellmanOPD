@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from b200_experiment.evaluation import metric_problem_score
+from b200_experiment.evaluation import evaluation_problem_scores, metric_problem_score
 from b200_experiment.vllm_evaluation import (
     _resolve_gpu_memory_utilization,
     _release_vllm_engine,
@@ -69,6 +69,14 @@ class VllmEvaluationTests(unittest.TestCase):
             metric_problem_score([True] + [False] * 15, "pass@8"), 0.5
         )
 
+    def test_same_eight_grades_produce_avg_and_pass_metrics(self):
+        scores = evaluation_problem_scores(
+            [True, False, False, False, False, False, False, False], "avg@8"
+        )
+        self.assertEqual(scores["selected"], 0.125)
+        self.assertEqual(scores["avg@8"], 0.125)
+        self.assertEqual(scores["pass@8"], 1.0)
+
     def test_pass_at_8_is_reported_and_uses_problem_level_success(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -108,6 +116,7 @@ class VllmEvaluationTests(unittest.TestCase):
             self.assertEqual(suite["parameters"]["metric"], "pass@8")
             self.assertEqual(result["pass_at_k"], 1.0)
             self.assertEqual(result["pass_at_8"], 1.0)
+            self.assertEqual(result["avg_at_8"], 1.0)
             self.assertEqual(result["accuracy"], 1.0)
 
     def test_distributed_shard_only_generates_its_round_robin_problems(self):
@@ -319,6 +328,8 @@ class VllmEvaluationTests(unittest.TestCase):
             )
             self.assertEqual(suite["benchmarks"]["MATH-500"]["total"], 8)
             self.assertEqual(suite["benchmarks"]["MATH-500"]["problems"], 1)
+            self.assertEqual(suite["benchmarks"]["MATH-500"]["avg_at_8"], 1.0)
+            self.assertEqual(suite["benchmarks"]["MATH-500"]["pass_at_8"], 1.0)
 
     def test_two_rank_shards_merge_to_single_gpu_metrics_and_order(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -342,7 +353,8 @@ class VllmEvaluationTests(unittest.TestCase):
                 "max_new_tokens": 8,
                 "temperature": 1.0,
                 "top_p": 1.0,
-                "num_responses": 1,
+                "num_responses": 8,
+                "metric": "avg@8",
                 "benchmark_names": ["MATH-500"],
                 "vllm": {"gpu_memory_utilization": 0.4},
             }
@@ -381,7 +393,15 @@ class VllmEvaluationTests(unittest.TestCase):
 
             single_result = single["benchmarks"]["MATH-500"]
             merged_result = merged["benchmarks"]["MATH-500"]
-            for key in ("correct", "total", "problems", "samples_per_problem", "accuracy"):
+            for key in (
+                "correct",
+                "total",
+                "problems",
+                "samples_per_problem",
+                "accuracy",
+                "avg_at_8",
+                "pass_at_8",
+            ):
                 self.assertEqual(merged_result[key], single_result[key])
             with gzip.open(
                 merged_result["predictions"], "rt", encoding="utf-8"

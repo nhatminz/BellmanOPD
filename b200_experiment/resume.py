@@ -708,8 +708,10 @@ def validate_append_history(
         for filename, kind in (
             ("metrics.jsonl", "jsonl"),
             ("eval_history.jsonl", "jsonl"),
+            ("eval_history_pass_at_8.jsonl", "jsonl"),
             ("train_metrics.csv", "csv"),
             ("eval_metrics.csv", "csv"),
+            ("eval_metrics_pass_at_8.csv", "csv"),
         ):
             path = output_dir / filename
             if kind == "jsonl":
