@@ -172,6 +172,20 @@ FINAL_ALLOCATION_KL_VALUES="0.0 0.005 0.02 0.05" \
   bash ablation/scripts/run_final_allocation_kl_ablation.sh
 ```
 
+Chạy bốn giá trị song song trên tám GPU, mỗi giá trị dùng hai GPU:
+
+```bash
+GPU_GROUPS="0,1;2,3;4,5;6,7" \
+FINAL_KL_RUN_MODE=parallel_groups \
+FINAL_ALLOCATION_KL_VALUES="0.0 0.005 0.02 0.05" \
+  bash ablation/scripts/run_final_allocation_kl_ablation.sh
+```
+
+Thứ tự ánh xạ là `0.0 -> GPU 0,1`, `0.005 -> GPU 2,3`,
+`0.02 -> GPU 4,5`, và `0.05 -> GPU 6,7`. Wrapper vẫn khóa ablation ở
+một epoch, `tanh_q99` và `direct_bounded_gibbs`; trong mỗi job,
+`TRAIN_NPROC_PER_NODE=2` được suy ra tự động từ kích thước nhóm GPU.
+
 Vẽ kết quả sau khi thay đúng bốn run name đã sinh:
 
 ```bash
@@ -217,7 +231,7 @@ GPU_LIST=0,1,2 TOP_K_VALUES="8 16 32" \
 GPU_LIST=0,1,2 LR_VALUES="5e-7 1e-6 2e-6" \
   bash ablation/scripts/sweep_lr_parallel.sh
 
-GPU_LIST=0,1,2,3 GAMMA_VALUES="0.95 0.99 0.995 0.999" \
+GPU_LIST=0,1,2,3,4,5,6,7 GAMMA_VALUES="0.95 0.99 0.995 0.999" \
   bash ablation/scripts/sweep_parallel_gamma.sh
 ```
 

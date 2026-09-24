@@ -4,6 +4,8 @@ set -euo pipefail
 # Sweep the final KL budget while holding every other CMT setting fixed.
 # RUN_MODE=sequential uses CUDA_VISIBLE_DEVICES for every run.
 # RUN_MODE=parallel maps one value to each GPU in GPU_LIST.
+# RUN_MODE=parallel_groups maps one value to each comma-separated GPU group;
+# groups themselves are separated by semicolons in GPU_GROUPS.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALUES="${FINAL_ALLOCATION_KL_VALUES:-0.0 0.005 0.02 0.05}"
 RUN_MODE="${FINAL_KL_RUN_MODE:-sequential}"
@@ -30,8 +32,12 @@ case "${RUN_MODE}" in
     export FINAL_ALLOCATION_KL_VALUES="${VALUES}"
     exec bash "${SCRIPT_DIR}/sweep_parallel.sh" final_allocation_kl "$@"
     ;;
+  parallel_groups|grouped)
+    export FINAL_ALLOCATION_KL_VALUES="${VALUES}"
+    exec bash "${SCRIPT_DIR}/sweep_parallel_groups.sh" final_allocation_kl "$@"
+    ;;
   *)
-    echo "FINAL_KL_RUN_MODE must be sequential or parallel" >&2
+    echo "FINAL_KL_RUN_MODE must be sequential, parallel, or parallel_groups" >&2
     exit 2
     ;;
 esac
