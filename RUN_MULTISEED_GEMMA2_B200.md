@@ -298,9 +298,9 @@ python3 -m b200_experiment.training_cost \
             outputs/gemma2_compare_seed42/cmt_opd
 ```
 
-Lệnh này ghi `training_cost_comparison.json` vào **từng thư mục method**. Nó không
-thêm retroactive TensorBoard points; muốn overhead xuất hiện ngay trong TensorBoard
-thì chạy OPD trước và truyền `COST_OPD_BASELINE` lúc train các phương pháp còn lại.
+Lệnh này ghi `training_cost_comparison.json` vào **từng thư mục method**. Thêm
+`--tensorboard` để bổ sung overhead từng step vào TensorBoard sau khi OPD đã đo xong.
+Muốn overhead xuất hiện ngay lúc train thì chạy OPD trước và truyền `COST_OPD_BASELINE`.
 Các run cũ chưa có cost logs không thể khôi phục chính xác time/memory bằng script này.
 
 Các launcher Qwen hiện có cũng nhận cost logging mới. Có thể điều chỉnh bằng

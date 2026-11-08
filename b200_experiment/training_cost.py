@@ -169,6 +169,22 @@ class TrainingCostLogger:
         settings = config.get("logging", {}).get("cost", {})
         self.enabled = bool(settings.get("enabled", True))
         self.warmup_rollouts = max(int(settings.get("warmup_rollouts", 1)), 0)
+        self.resume_step = resume_step
+        self.excluded_other_workload_rows = 0
+        self._session_first_rollout: int | None = None
+        self.runtime_settings = {
+            "micro_batch_size_per_gpu": config.get("training", {}).get(
+                "micro_batch_size_per_gpu"
+            ),
+            "score_micro_batch_size": config.get("selector", {}).get(
+                "score_micro_batch_size"
+            ),
+            "ppo_mini_batch_size": config.get("training", {}).get(
+                "ppo_mini_batch_size"
+            ),
+            "rollout_batch_size": config.get("rollout", {}).get("batch_size"),
+            "num_responses": config.get("rollout", {}).get("num_responses"),
+        }
         self.baseline = None
         baseline_path = settings.get("opd_baseline")
         if self.enabled and baseline_path:
@@ -194,12 +210,27 @@ class TrainingCostLogger:
             for line in path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     row = json.loads(line)
+                    if resume_step is not None and int(row["step"]) > resume_step:
+                        continue
                     if row["comparison_signature"] != self.signature:
-                        raise ValueError(
-                            "Existing training_cost.jsonl belongs to a different workload"
-                        )
-                    if resume_step is None or int(row["step"]) <= resume_step:
-                        self.rows[int(row["step"])] = row
+                        if resume_step is None:
+                            raise ValueError(
+                                "Existing training_cost.jsonl belongs to a different workload"
+                            )
+                        # Micro-batch/runtime changes are supported by model
+                        # resume. Do not reject them solely because older cost
+                        # measurements used another workload, or average the
+                        # two configurations together.
+                        self.excluded_other_workload_rows += 1
+                        continue
+                    self.rows[int(row["step"])] = row
+
+    def is_warmup(self, rollout_index: int) -> bool:
+        # A resumed process also warms up kernels/allocators. Its first
+        # rollout can be a partially consumed PPO group, so exclude it too.
+        if self._session_first_rollout is None:
+            self._session_first_rollout = int(rollout_index)
+        return int(rollout_index) - self._session_first_rollout < self.warmup_rollouts
 
     def write(self, event: dict) -> None:
         if not self.enabled:
@@ -215,6 +246,9 @@ class TrainingCostLogger:
             "rollout_batch_index": int(event["rollout_batch_index"]),
             "comparison_signature": self.signature,
             "world_size": self.world_size,
+            "resume_step": self.resume_step,
+            "excluded_other_workload_rows": self.excluded_other_workload_rows,
+            "runtime_settings": self.runtime_settings,
             "num_valid_tokens": event.get("num_valid_tokens"),
             **{k: event[k] for k in COST_TAGS.values() if k in event},
         }
@@ -250,7 +284,12 @@ class TrainingCostLogger:
             "comparison_signature": self.signature,
             "world_size": self.world_size,
             "warmup_rollouts": self.warmup_rollouts,
+            "warmup_scope": "first N rollouts in each fresh/resumed process session",
+            "resume_step": self.resume_step,
+            "runtime_settings": self.runtime_settings,
+            "excluded_other_workload_rows": self.excluded_other_workload_rows,
             "measured_optimizer_steps": len(measured),
+            "logged_step_max": max(self.rows, default=None),
             "measured_rollouts": len({r["rollout_batch_index"] for r in measured}),
             "train_seconds_per_optimizer_step_mean": statistics.mean(times)
             if times
@@ -283,7 +322,73 @@ class TrainingCostLogger:
                 else None
             ),
         }
-        _atomic_json(self.output / "training_cost_summary.json", summary)
+        tensorboard_dir = Path(
+            self.config.get("logging", {})
+            .get("tensorboard", {})
+            .get("log_dir", "tensorboard")
+        )
+        summary["tensorboard_log_dir"] = str(
+            (
+                tensorboard_dir
+                if tensorboard_dir.is_absolute()
+                else self.output / tensorboard_dir
+            ).resolve()
+        )
+        summary_path = self.output / "training_cost_summary.json"
+        if summary_path.is_file():
+            previous = json.loads(summary_path.read_text(encoding="utf-8"))
+            previous_signature = previous.get("comparison_signature")
+            if previous_signature and previous_signature != self.signature:
+                # Preserve the previous measurement segment before updating the
+                # canonical summary following an OOM/runtime configuration change.
+                archive = (
+                    self.output / f"training_cost_summary_{previous_signature}.json"
+                )
+                if not archive.exists():
+                    _atomic_json(archive, previous)
+        _atomic_json(summary_path, summary)
+
+
+def write_comparison_tensorboard(output: Path, summary: dict, baseline: dict) -> dict:
+    """Backfill measured per-step overhead when the OPD run finishes later."""
+    rows = {}
+    path = output / "training_cost.jsonl"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"TensorBoard backfill requires per-step cost logs: {path}"
+        )
+    maximum_step = summary.get("logged_step_max")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("comparison_signature") != summary["comparison_signature"]:
+            continue
+        if maximum_step is not None and int(row["step"]) > int(maximum_step):
+            continue
+        rows[int(row["step"])] = row
+    measured = [row for row in rows.values() if not row["cost_is_warmup"]]
+    if not measured:
+        raise ValueError(
+            f"No matching measured per-step cost logs to backfill: {output}"
+        )
+    from torch.utils.tensorboard import SummaryWriter
+
+    log_dir = Path(summary.get("tensorboard_log_dir") or output / "tensorboard")
+    writer = SummaryWriter(log_dir=str(log_dir))
+    try:
+        for row in measured:
+            overhead = 100 * (
+                row["cost_train_seconds_per_optimizer_step"]
+                / baseline["train_seconds_per_optimizer_step_mean"]
+                - 1
+            )
+            writer.add_scalar(
+                "cost/overhead_vs_opd_percent", overhead, global_step=int(row["step"])
+            )
+    finally:
+        writer.close()
+    return {"log_dir": str(log_dir), "written_steps": len(measured)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -292,6 +397,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--baseline", required=True, type=Path)
     parser.add_argument("--outputs", required=True, nargs="+", type=Path)
+    parser.add_argument(
+        "--tensorboard",
+        action="store_true",
+        help="Also backfill per-step overhead into each run's TensorBoard after OPD is measured",
+    )
     args = parser.parse_args(argv)
 
     def read(path):
@@ -320,6 +430,10 @@ def main(argv: list[str] | None = None) -> int:
             "method_cost": summary,
             "opd_cost": baseline,
         }
+        if args.tensorboard:
+            report["tensorboard_backfill"] = write_comparison_tensorboard(
+                output, summary, baseline
+            )
         _atomic_json(output / "training_cost_comparison.json", report)
         print(
             json.dumps(

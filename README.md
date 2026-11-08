@@ -1,5 +1,8 @@
 # Pure OPD vs TA-OPD vs CMT vs GRPO trên NVIDIA B200
 
+Launcher Gemma độc lập theo từng method, xử lý OOM backward và resume run cũ:
+[`RUN_GEMMA_OOM_RESUME_B200.md`](RUN_GEMMA_OOM_RESUME_B200.md).
+
 Eval checkpoint chọn trước với seed mới (không ghi đè history), tổng hợp avg@8/pass@8,
 train Gemma‑2 9B‑it → 2B‑it và đọc training cost: xem
 [`RUN_MULTISEED_GEMMA2_B200.md`](RUN_MULTISEED_GEMMA2_B200.md).

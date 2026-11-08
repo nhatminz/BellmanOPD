@@ -5363,7 +5363,7 @@ def run_training(
                         rollout_train_seconds=training_rollout_seconds,
                         optimizer_steps=optimizer_steps_completed,
                         allocation_seconds=event["allocation_time_sec"],
-                        warmup=rollout_index < cost_logger.warmup_rollouts,
+                        warmup=cost_logger.is_warmup(rollout_index),
                         device_peak_bytes=device_peak_bytes,
                     )
                 )
