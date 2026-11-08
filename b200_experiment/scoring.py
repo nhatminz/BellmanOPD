@@ -203,6 +203,7 @@ def supports_response_only_logits(model) -> bool:
         "qwen3",
         "qwen3_moe",
         "qwen3_5_text",
+        "gemma2",
     }
 
 

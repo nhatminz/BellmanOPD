@@ -172,6 +172,11 @@ training:
   save_optimizer: true
 
 logging:
+  cost:
+    enabled: true
+    warmup_rollouts: 1
+    memory_sample_interval_sec: 0.25
+    opd_baseline: null
   # Optional detailed TA audit log; disabled by default to bound disk usage.
   selected_tokens_enabled: false
   selector_chunk_steps: 50

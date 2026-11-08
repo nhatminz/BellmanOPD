@@ -517,6 +517,29 @@ class TokenScoreStatsLogger:
             step == 1 or step == final_step or step % self.interval == 0
         )
 
+    def scheduled_steps(
+        self, first_step: int, last_step: int, final_step: int
+    ) -> list[int]:
+        """Return logging boundaries crossed by a multi-step rollout.
+
+        CMT can execute several PPO optimizer steps from one full rollout.  A
+        boundary such as step 50 may therefore lie inside a rollout whose last
+        optimizer step is 52.  Scheduling on the crossed interval prevents
+        those boundaries from being silently skipped.
+        """
+        if not self.enabled or last_step < first_step:
+            return []
+        steps: set[int] = set()
+        first_multiple = (
+            (max(int(first_step), 1) + self.interval - 1) // self.interval
+        ) * self.interval
+        steps.update(range(first_multiple, int(last_step) + 1, self.interval))
+        if first_step <= 1 <= last_step:
+            steps.add(1)
+        if first_step <= final_step <= last_step:
+            steps.add(int(final_step))
+        return sorted(steps)
+
     def write(
         self, step: int, final_step: int, diagnostics: dict[str, Any]
     ) -> Path | None:

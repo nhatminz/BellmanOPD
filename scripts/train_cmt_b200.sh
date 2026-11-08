@@ -78,6 +78,10 @@ export CMT_GAIN_HEATMAP_ENABLED="${CMT_GAIN_HEATMAP_ENABLED:-false}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-150}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-150}"
 export LOG_INTERVAL="${LOG_INTERVAL:-1}"
+# Compact all-valid-token histograms/quantiles.  This is independent of
+# checkpoint/evaluation cadence and is enabled by default for CMT.
+export TOKEN_SCORE_STATS_ENABLED="${TOKEN_SCORE_STATS_ENABLED:-true}"
+export TOKEN_SCORE_INTERVAL="${TOKEN_SCORE_INTERVAL:-100}"
 export ROLLOUT_BACKEND="${ROLLOUT_BACKEND:-vllm}"
 
 # Keep enabled when accuracy-over-step plots are needed after training.
@@ -116,6 +120,7 @@ fi
 build_training_args "${OUTPUT_DIR}"
 echo "CMT run: ${RUN_NAME}"
 echo "CMT output: ${OUTPUT_DIR}"
+echo "Token-score stats: enabled=${TOKEN_SCORE_STATS_ENABLED}, interval=${TOKEN_SCORE_INTERVAL} optimizer steps"
 if [[ -n "${RESUME_FROM_CHECKPOINT}" ]]; then
   echo "Resume checkpoint: ${RESUME_FROM_CHECKPOINT}"
 else

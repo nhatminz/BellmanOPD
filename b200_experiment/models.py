@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -155,6 +156,59 @@ def model_dtype_kwargs(dtype: torch.dtype) -> dict[str, torch.dtype]:
     return {"dtype" if major >= 5 else "torch_dtype": dtype}
 
 
+def choose_model_attention_implementation(model_config, requested: str) -> str:
+    """Gemma2's attention softcap must survive HF/vLLM policy scoring.
+
+    Transformers 4.57's SDPA adapter accepts but ignores ``softcap``. The
+    eager and flash-attention-2 implementations actually apply it.
+    """
+    text = effective_text_config(model_config)
+    if text.model_type == "gemma2" and getattr(text, "attn_logit_softcapping", None):
+        if requested == "sdpa":
+            raise ValueError(
+                "Gemma2 attention softcapping requires eager or flash_attention_2; Transformers SDPA ignores softcap"
+            )
+        attention = choose_attention_implementation(requested)
+        if attention == "flash_attention_2":
+            try:
+                from flash_attn import flash_attn_func
+
+                supports_softcap = (
+                    "softcap" in inspect.signature(flash_attn_func).parameters
+                )
+            except (ImportError, ValueError):
+                supports_softcap = False
+            if not supports_softcap:
+                if requested == "auto":
+                    return "eager"
+                raise ValueError(
+                    "Installed flash-attention-2 lacks softcap support required by Gemma2"
+                )
+        if requested == "auto":
+            return "eager" if attention == "sdpa" else attention
+    return choose_attention_implementation(requested)
+
+
+def generation_stop_token_ids(tokenizer, config: dict[str, Any]) -> list[int]:
+    """Include chat end-of-turn IDs, which need not equal tokenizer.eos.
+
+    Explicit config is authoritative. Other models keep their existing EOS
+    behavior. Gemma2's <end_of_turn> is distinct from <eos>.
+    """
+    configured = config.get("models", {}).get("stop_token_ids")
+    if configured is not None:
+        ids = [configured] if isinstance(configured, int) else list(configured)
+    else:
+        eos = tokenizer.eos_token_id
+        ids = [eos] if isinstance(eos, int) else list(eos or [])
+        vocab = tokenizer.get_vocab() if hasattr(tokenizer, "get_vocab") else {}
+        if "<end_of_turn>" in vocab:
+            ids.append(vocab["<end_of_turn>"])
+    if not ids or any(not isinstance(value, int) or value < 0 for value in ids):
+        raise ValueError(f"Invalid generation stop token IDs: {ids}")
+    return list(dict.fromkeys(ids))
+
+
 def inspect_model_assets(config: dict[str, Any]) -> dict[str, Any]:
     model_cfg = config["models"]
     tokenizer_protocol = validate_shared_tokenizer_protocol(config)
@@ -187,8 +241,8 @@ def inspect_model_assets(config: dict[str, Any]) -> dict[str, Any]:
         "teacher_parameters_declared": getattr(teacher_config, "num_parameters", None),
         "compatibility": compatibility,
         "tokenizer_protocol": tokenizer_protocol,
-        "attention_implementation": choose_attention_implementation(
-            model_cfg.get("attention_implementation", "auto")
+        "attention_implementation": choose_model_attention_implementation(
+            student_config, model_cfg.get("attention_implementation", "auto")
         ),
     }
 
@@ -280,8 +334,8 @@ def load_student_model(config: dict[str, Any], device: torch.device):
     student_config = AutoConfig.from_pretrained(student_path, local_files_only=True)
     tokenizer = AutoTokenizer.from_pretrained(student_path, local_files_only=True)
     dtype = _dtype(model_cfg.get("dtype", "bfloat16"))
-    attention = choose_attention_implementation(
-        model_cfg.get("attention_implementation", "auto")
+    attention = choose_model_attention_implementation(
+        student_config, model_cfg.get("attention_implementation", "auto")
     )
     common = {
         "local_files_only": True,

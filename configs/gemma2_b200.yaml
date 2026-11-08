@@ -1,0 +1,37 @@
+# Overlay applied to the existing opd/ta/iw/cmt method config.
+# Checkpoints/models/data remain under the B200 shared storage root.
+models:
+  teacher_path: models/gemma-2-9b-it
+  student_path: models/gemma-2-2b-it
+  # Auto chooses FA2 when available, otherwise eager. SDPA in Transformers
+  # 4.57 ignores Gemma2 attention softcapping and must not be used here.
+  attention_implementation: auto
+  stop_token_ids: [1, 107]  # <eos>, <end_of_turn>
+
+rollout:
+  max_new_tokens: 4096
+  vllm:
+    max_model_len: 8192
+
+selector:
+  score_micro_batch_size: 1
+
+training:
+  micro_batch_size_per_gpu: 1
+
+training_evaluation:
+  max_new_tokens: 4096
+  vllm:
+    max_model_len: 8192
+
+evaluation:
+  max_new_tokens: 4096
+  vllm:
+    max_model_len: 8192
+
+logging:
+  cost:
+    enabled: true
+    warmup_rollouts: 1
+    memory_sample_interval_sec: 0.25
+    opd_baseline: null

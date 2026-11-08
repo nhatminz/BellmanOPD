@@ -69,6 +69,7 @@ from .eval_schedule import (
 )
 from .metadata import collect_metadata, save_metadata
 from .models import (
+    generation_stop_token_ids,
     is_qwen35_composite_text_model,
     load_models,
     load_student_model,
@@ -76,6 +77,7 @@ from .models import (
     qwen35_composite_weight_name,
     validate_shared_tokenizer_protocol,
 )
+from .training_cost import DeviceMemoryMonitor, TrainingCostLogger, cost_fields
 from .fsdp import (
     clip_grad_norm,
     distributed_strategy,
@@ -487,8 +489,7 @@ def _apply_global_cmt_correction(
     raw_value = (
         global_diagnostics["sequential_gain_raw"]
         if d_only
-        else global_diagnostics["gain"]
-        + global_diagnostics["sequential_gain_raw"]
+        else global_diagnostics["gain"] + global_diagnostics["sequential_gain_raw"]
     )
     corrected_value = robust_d if d_only else robust_value
     kappa_values = torch.full_like(corrected_value, float(kappa))
@@ -498,9 +499,7 @@ def _apply_global_cmt_correction(
         local_allocation_score = local.scores
     else:
         global_allocation_score = corrected_value
-        local_allocation_score = scatter_valid(
-            corrected_value[start:end], valid_mask
-        )
+        local_allocation_score = scatter_valid(corrected_value[start:end], valid_mask)
     diagnostics = dict(local.diagnostics)
     diagnostics.update(
         sequential_gain_raw=scatter_valid(
@@ -509,9 +508,7 @@ def _apply_global_cmt_correction(
         learning_value_raw=scatter_valid(raw_value[start:end], valid_mask),
         correction_kappa=scatter_valid(kappa_values[start:end], valid_mask),
         sequential_gain_robust=scatter_valid(robust_d[start:end], valid_mask),
-        learning_value_robust=scatter_valid(
-            corrected_value[start:end], valid_mask
-        ),
+        learning_value_robust=scatter_valid(corrected_value[start:end], valid_mask),
         allocation_score=local_allocation_score,
         correction_mode=mode,
         correction_quantile=float(quantile),
@@ -1620,11 +1617,7 @@ def _run_training_evaluation(
                 # with plotting and legacy history readers.
                 "accuracy": selected_score,
                 "avg_at_n": selected_score,
-                **(
-                    {"avg_at_8": result["avg_at_8"]}
-                    if "avg_at_8" in result
-                    else {}
-                ),
+                **({"avg_at_8": result["avg_at_8"]} if "avg_at_8" in result else {}),
                 **(
                     {
                         "pass_at_k": (
@@ -1636,11 +1629,7 @@ def _run_training_evaluation(
                     if history_metric == "pass@8" or "pass_at_k" in result
                     else {}
                 ),
-                **(
-                    {"pass_at_8": result["pass_at_8"]}
-                    if "pass_at_8" in result
-                    else {}
-                ),
+                **({"pass_at_8": result["pass_at_8"]} if "pass_at_8" in result else {}),
                 "problems": result.get("problems"),
                 "samples_per_problem": result.get(
                     "samples_per_problem", samples_per_problem
@@ -1936,6 +1925,8 @@ def _opd_train_step(
     gibbs_allocation_seconds = 0.0
     grouped_rows_seen: set[int] = set()
     for ppo_index in range(offset, min(ppo_count, offset + remaining_limit)):
+        cuda_sync(device)
+        minibatch_started = time.perf_counter()
         # PPO_MINI_BATCH_SIZE is global. CMT uses response-index-major groups;
         # other methods retain the deterministic rank-interleaved order.
         if grouped_ids is None:
@@ -2077,7 +2068,8 @@ def _opd_train_step(
             gibbs_allocation_count += 1
         else:
             ppo_weights = position_weights.index_select(0, indices)
-        gibbs_allocation_seconds += time.perf_counter() - allocation_started
+        allocation_seconds = time.perf_counter() - allocation_started
+        gibbs_allocation_seconds += allocation_seconds
         local_weight_mass = float(ppo_weights[ppo_valid].detach().float().sum().item())
         global_weight_mass = distributed.sum_float(local_weight_mass)
         optimizer.zero_grad(set_to_none=True)
@@ -2286,6 +2278,7 @@ def _opd_train_step(
             "training_forward_time": forward_seconds,
             "backward_time": backward_seconds,
             "optimizer_time": optimizer_seconds,
+            "allocation_time_sec": allocation_seconds,
             "global_weight_mass": global_weight_mass,
             "clip_fraction": global_clipped_candidates / max(global_candidate_count, 1),
             "ratio_mean": global_ratio_mean,
@@ -2300,9 +2293,7 @@ def _opd_train_step(
             ),
             # Backward-compatible alias. In direct mode this is the KL of the
             # final bounded weights, not the unbounded diagnostic reference.
-            "allocation_kl_achieved": float(
-                allocation_metrics["allocation_kl_final"]
-            ),
+            "allocation_kl_achieved": float(allocation_metrics["allocation_kl_final"]),
             "allocation_inverse_temperature": float(allocation_inverse_temperature),
             "rollout_id": int(rollout_id),
             "optimizer_step": int(global_optimizer_step),
@@ -2335,6 +2326,8 @@ def _opd_train_step(
                 "allocation_solver_status",
             )
         }
+        cuda_sync(device)
+        metric["optimizer_step_wall_time_sec"] = time.perf_counter() - minibatch_started
         minibatch_metrics.append(metric)
         if on_optimizer_step is not None:
             on_optimizer_step(global_optimizer_step, metric)
@@ -3001,7 +2994,7 @@ def _run_grpo_training(
             max_new_tokens=int(config["rollout"].get("max_new_tokens", 256)),
             temperature=rollout_temperature,
             top_p=float(config["rollout"].get("top_p", 1.0)),
-            eos_token_ids=tokenizer.eos_token_id,
+            eos_token_ids=generation_stop_token_ids(tokenizer, config),
             pad_token_id=tokenizer.pad_token_id,
             seed=int(config["rollout"].get("seed", seed)),
             sample_seed_offset=rollout_index * batch_size * group_size
@@ -3843,6 +3836,14 @@ def run_training(
         enabled=distributed.is_main,
         resume_step=resume_step,
     )
+    # Initialize on every rank so an invalid baseline fails consistently before
+    # ranks enter later training collectives; only rank zero writes artifacts.
+    cost_logger = TrainingCostLogger(
+        output_dir,
+        config,
+        distributed.world_size,
+        resume_step=resume_step if resume_state is not None else None,
+    )
     training_eval_settings = config.get("training_evaluation", {})
     evaluation_steps = training_evaluation_steps(max_steps, training_eval_settings)
     if evaluation_steps and distributed.is_main:
@@ -3928,6 +3929,20 @@ def run_training(
         if distributed.is_main:
             progress.set_postfix_str(f"stage=rollout-{rollout_backend}", refresh=True)
         torch.cuda.reset_peak_memory_stats(device)
+        memory_monitor = None
+        if bool(config.get("logging", {}).get("cost", {}).get("enabled", True)):
+
+            def read_device_used_bytes():
+                free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+                return total_bytes - free_bytes
+
+            memory_monitor = DeviceMemoryMonitor(
+                read_device_used_bytes,
+                config.get("logging", {})
+                .get("cost", {})
+                .get("memory_sample_interval_sec", 0.25),
+            )
+            memory_monitor.start()
         global_indices = epoch_batch_indices(
             len(records), batch_size, rollout_index, seed
         )
@@ -3972,7 +3987,7 @@ def run_training(
             max_new_tokens=int(config["rollout"].get("max_new_tokens", 256)),
             temperature=float(config["rollout"].get("temperature", 1.0)),
             top_p=float(config["rollout"].get("top_p", 1.0)),
-            eos_token_ids=tokenizer.eos_token_id,
+            eos_token_ids=generation_stop_token_ids(tokenizer, config),
             pad_token_id=tokenizer.pad_token_id,
             seed=int(config["rollout"].get("seed", seed)),
             # Repeated prompts are separate requests with globally unique,
@@ -4121,11 +4136,14 @@ def run_training(
                         cmt_raw.diagnostics[field] = value.detach().float()
         iw_weights: torch.Tensor | None = None
         iw_weight_stats: dict[str, float] | None = None
+        iw_reference_time = 0.0
         if method == "iw":
             # Official IW-OPD uses the sampled response action (not a
             # candidate-wise Top-K reward) and applies a stop-gradient prefix
             # remaining-discrepancy multiplier to that OPD advantage.
-            opd_reference, iw_weights = build_iw_opd_reference(
+            iw_result, iw_reference_time = _timed(
+                device,
+                build_iw_opd_reference,
                 rollout.response_ids,
                 student_scores.sampled_log_probs,
                 teacher_scores.sampled_log_probs,
@@ -4134,6 +4152,7 @@ def run_training(
                 use_abs=bool(config.get("iw_opd", {}).get("use_abs", True)),
                 eps=float(config.get("iw_opd", {}).get("eps", 1.0e-8)),
             )
+            opd_reference, iw_weights = iw_result
             iw_weight_stats = _global_tensor_stats(iw_weights[valid], distributed)
         elif method in {"opd", "ta", "cmt"}:
             opd_reference = build_student_topk_opd_reference(
@@ -4276,7 +4295,7 @@ def run_training(
                     raise AssertionError("IW distributed token layouts differ")
                 global_primary_diagnostics["iw_weight"] = global_iw_weights
             ta_time = bellman_scan_time = 0.0
-            selector_time = iw_gather_time
+            selector_time = iw_reference_time + iw_gather_time
         elif method == "opd":
             if distributed.is_main:
                 progress.set_postfix_str("stage=selector-OPD-uniform", refresh=True)
@@ -4332,6 +4351,8 @@ def run_training(
                 distributed,
             )
             primary, global_cmt_diagnostics, primary_start, primary_end = cmt_globalized
+            cuda_sync(device)
+            correction_started = time.perf_counter()
             (
                 primary,
                 global_cmt_diagnostics,
@@ -4345,9 +4366,13 @@ def run_training(
                 mode=cmt_correction_mode,
                 quantile=cmt_correction_quantile,
             )
+            cuda_sync(device)
+            cmt_correction_time = time.perf_counter() - correction_started
             ta_time = pgt_score_time
             bellman_scan_time = cmt_score_time
-            selector_time = pgt_score_time + cmt_score_time + cmt_gather_time
+            selector_time = (
+                pgt_score_time + cmt_score_time + cmt_gather_time + cmt_correction_time
+            )
             global_primary_diagnostics = global_cmt_diagnostics
         else:
             if use_joint_scoring:
@@ -4482,9 +4507,14 @@ def run_training(
             raise AssertionError("Selector changed the original rollout")
         token_score_stats_path = None
         if method != "cmt" and distributed.is_main:
-            token_score_stats_path = score_stats_logger.write(
-                rollout_last_optimizer_step, max_steps, global_primary_diagnostics
-            )
+            for stats_step in score_stats_logger.scheduled_steps(
+                rollout_first_optimizer_step,
+                rollout_last_optimizer_step,
+                max_steps,
+            ):
+                token_score_stats_path = score_stats_logger.write(
+                    stats_step, max_steps, global_primary_diagnostics
+                )
         sample_ids = [
             f"{stable_sample_id(record, index)}::response-{response_index}"
             for record, index, response_index in zip(
@@ -4536,7 +4566,10 @@ def run_training(
                 or (save_interval > 0 and current_step % save_interval == 0)
             )
             checkpoint_path = None
+            _metrics["checkpoint_time_sec"] = 0.0
+            _metrics["evaluation_snapshot_time_sec"] = 0.0
             if should_save:
+                checkpoint_started = time.perf_counter()
                 if distributed.is_main:
                     progress.set_postfix_str("stage=checkpoint", refresh=True)
                 checkpoint_path = _save_checkpoint(
@@ -4549,11 +4582,16 @@ def run_training(
                     bool(training.get("save_optimizer", True)),
                     distributed,
                 )
+                cuda_sync(device)
+                _metrics["checkpoint_time_sec"] = (
+                    time.perf_counter() - checkpoint_started
+                )
                 checkpoints_by_step[current_step] = checkpoint_path
             if should_evaluate:
                 evaluation_path = checkpoint_path
                 temporary = False
                 if evaluation_path is None:
+                    snapshot_started = time.perf_counter()
                     evaluation_path = (
                         output_dir
                         / ".evaluation_snapshots"
@@ -4567,6 +4605,10 @@ def run_training(
                         tokenizer,
                         evaluation_path,
                         distributed,
+                    )
+                    cuda_sync(device)
+                    _metrics["evaluation_snapshot_time_sec"] = (
+                        time.perf_counter() - snapshot_started
                     )
                     temporary = True
                 evaluation_sources[current_step] = (evaluation_path, temporary)
@@ -4708,11 +4750,16 @@ def run_training(
                     )
                     for key, value in global_primary_diagnostics.items()
                 }
-                token_score_stats_path = score_stats_logger.write(
+                for stats_step in score_stats_logger.scheduled_steps(
+                    rollout_first_optimizer_step,
                     rollout_last_optimizer_step,
                     max_steps,
-                    processed_stats,
-                )
+                ):
+                    token_score_stats_path = score_stats_logger.write(
+                        stats_step,
+                        max_steps,
+                        processed_stats,
+                    )
             audit_paths: list[str] = []
             motivation_summary_paths: list[str] = []
             allocation_metrics_by_step = {
@@ -4801,6 +4848,19 @@ def run_training(
         checkpoint = checkpoints_by_step.get(step)
         cuda_sync(device)
         local_wall_time = time.perf_counter() - step_started
+        io_seconds = sum(
+            m.get("checkpoint_time_sec", 0.0)
+            + m.get("evaluation_snapshot_time_sec", 0.0)
+            for m in train_metrics["minibatches"]
+        )
+        training_rollout_seconds = distributed.max_float(
+            max(local_wall_time - io_seconds, 0.0)
+        )
+        if memory_monitor is not None:
+            memory_monitor.finish()
+        device_peak_bytes = distributed.max_int(
+            memory_monitor.peak if memory_monitor else 0
+        )
         local_valid_tokens = int(valid.sum().item())
         response_lengths = valid.sum(dim=-1)
         active_responses = response_lengths.gt(0)
@@ -4821,7 +4881,7 @@ def run_training(
             .sum()
             .item()
         )
-        eos_token_ids = tokenizer.eos_token_id
+        eos_token_ids = generation_stop_token_ids(tokenizer, config)
         eos_token_ids = (
             [eos_token_ids] if isinstance(eos_token_ids, int) else eos_token_ids
         )
@@ -4948,8 +5008,7 @@ def run_training(
                 "rac": "literal_union_student_topk_teacher_topk",
                 "pgt": "literal_union_student_topk_teacher_topk",
                 "cmt": (
-                    "g_student_topk__transition_literal_union_"
-                    "student_topk_teacher_topk"
+                    "g_student_topk__transition_literal_union_student_topk_teacher_topk"
                 ),
                 "iw": "sampled_response_action",
             }[method],
@@ -5041,6 +5100,13 @@ def run_training(
                 train_metrics["optimizer_time"]
             ),
             "wall_clock_step_time": wall_time,
+            "training_rollout_time_excluding_io_sec": training_rollout_seconds,
+            "device_memory_samples_rank0": memory_monitor.samples
+            if memory_monitor
+            else 0,
+            "device_memory_sampling_error_rank0": memory_monitor.error
+            if memory_monitor
+            else None,
             "tokens_per_second": valid_tokens / max(wall_time, 1e-12),
             "throughput_tokens_per_sec": valid_tokens / max(wall_time, 1e-12),
             "generated_tokens_per_second": valid_tokens
@@ -5185,6 +5251,18 @@ def run_training(
             event.update(
                 {
                     "step": event_step,
+                    "optimizer_step_wall_time_sec": distributed.max_float(
+                        minibatch_metric["optimizer_step_wall_time_sec"]
+                    ),
+                    "checkpoint_time_sec": distributed.max_float(
+                        minibatch_metric.get("checkpoint_time_sec", 0.0)
+                    ),
+                    "evaluation_snapshot_time_sec": distributed.max_float(
+                        minibatch_metric.get("evaluation_snapshot_time_sec", 0.0)
+                    ),
+                    "allocation_time_sec": distributed.max_float(
+                        minibatch_metric.get("allocation_time_sec", 0.0)
+                    ),
                     "train_loss": minibatch_metric["loss"],
                     "loss": minibatch_metric["loss"],
                     "weighted_final_loss": minibatch_metric["weighted_final_loss"],
@@ -5278,10 +5356,22 @@ def run_training(
             else:
                 event.pop("periodic_evaluation", None)
                 event.pop("wall_clock_step_plus_eval_time", None)
+            if cost_logger.enabled:
+                event.update(
+                    cost_fields(
+                        event,
+                        rollout_train_seconds=training_rollout_seconds,
+                        optimizer_steps=optimizer_steps_completed,
+                        allocation_seconds=event["allocation_time_sec"],
+                        warmup=rollout_index < cost_logger.warmup_rollouts,
+                        device_peak_bytes=device_peak_bytes,
+                    )
+                )
             training_events.append(event)
         final_metrics = training_events[-1]
         if distributed.is_main:
             for event in training_events:
+                cost_logger.write(event)
                 _append_jsonl(metrics_path, event)
                 _append_train_metrics_csv(output_dir / "train_metrics.csv", event)
                 tensorboard_logger.write(event["step"], event, method)

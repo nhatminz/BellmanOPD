@@ -119,6 +119,8 @@ export MAX_RESPONSE_LENGTH=4096
 export TOP_K=16
 export SAVE_INTERVAL=150
 export EVAL_INTERVAL=150
+export TOKEN_SCORE_STATS_ENABLED=true
+export TOKEN_SCORE_INTERVAL=100
 export ROLLOUT_VLLM_GPU_MEMORY_UTILIZATION=0.6
 export ROLLOUT_VLLM_MAX_MODEL_LEN=5200
 export TRAIN_EVAL_ENABLED=true
@@ -166,6 +168,10 @@ CMT mặc định dùng `CMT_ALLOCATION_MODE=direct_bounded_gibbs`,
 `CMT_SUCCESSOR_LAMBDA=1.0`, Student Top-K cho local `g_t`, union chỉ cho sequential
 accessibility, Student Top-16 cho OPD loss và `top_p=1`.
 Gibbs được chuẩn hoá độc lập trong từng PPO group 64 trajectory (one Gibbs = one update).
+`token_score_stats/step-*.json` được ghi ở step 1, mỗi
+`TOKEN_SCORE_INTERVAL` optimizer step và step cuối. Scheduler xét cả interval
+boundary nằm bên trong một full rollout, nên mốc 50 không còn bị bỏ qua khi một
+rollout CMT tạo bốn optimizer step.
 Full-vocabulary CMT diagnostics
 không bật mặc định:
 
@@ -1254,3 +1260,9 @@ bash scripts/plot_passk_experiment.sh \
   opd_checkpoint_000600_qwen3_4b_opd_run_name \
   cmt_checkpoint_000600_qwen3_4b_cmt_run_name
 ```
+
+Bổ sung: eval nhiều seed và Gemma‑2
+
+Hướng dẫn mới, có lệnh chọn checkpoint của run cũ, giữ nguyên history, tổng hợp
+mean ± std và train Gemma‑2 OPD/TA/IW/CMT kèm cost logs nằm tại
+[`RUN_MULTISEED_GEMMA2_B200.md`](RUN_MULTISEED_GEMMA2_B200.md).

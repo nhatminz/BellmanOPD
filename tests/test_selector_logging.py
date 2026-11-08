@@ -147,6 +147,16 @@ class SelectorLoggingTests(unittest.TestCase):
             self.assertEqual(payload["scores"]["w"]["count"], 17)
             self.assertEqual(payload["scores"]["w"]["mean"], 1.0)
 
+    def test_token_stats_schedule_keeps_interval_crossed_inside_rollout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            logger = TokenScoreStatsLogger(
+                temporary, "cmt", interval=50, enabled=True
+            )
+            self.assertEqual(logger.scheduled_steps(49, 52, 750), [50])
+            self.assertEqual(logger.scheduled_steps(97, 100, 750), [100])
+            self.assertEqual(logger.scheduled_steps(1, 4, 750), [1])
+            self.assertEqual(logger.scheduled_steps(749, 750, 750), [750])
+
     def test_compact_cmt_stats_accept_all_selector_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             keys = (

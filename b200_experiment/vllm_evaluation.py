@@ -4,6 +4,7 @@ import argparse
 from contextlib import contextmanager
 import gc
 import gzip
+import copy
 import json
 import os
 import signal
@@ -18,6 +19,7 @@ from typing import Any
 import torch
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
+from .models import generation_stop_token_ids
 
 from .config import load_config
 from .distributed import isolate_distributed_subprocess_environment
@@ -60,9 +62,7 @@ def _terminate_process_group(process: subprocess.Popen, timeout: float = 10.0) -
 
 
 @contextmanager
-def _exclusive_evaluation_gpu_locks(
-    devices: list[str], timeout: float = 24 * 60 * 60
-):
+def _exclusive_evaluation_gpu_locks(devices: list[str], timeout: float = 24 * 60 * 60):
     """Serialize independent re-evaluations that target the same GPU.
 
     Separate shell commands commonly inherit the launcher default
@@ -143,13 +143,9 @@ def _resolve_gpu_memory_utilization(vllm_settings: dict[str, Any]) -> float:
     # cannot see that future peak, so reserve it explicitly in addition to the
     # configured device headroom.  The default is intentional for old resolved
     # configs that predate this setting.
-    workspace_headroom_gib = float(
-        vllm_settings.get("gpu_workspace_headroom_gib", 2)
-    )
+    workspace_headroom_gib = float(vllm_settings.get("gpu_workspace_headroom_gib", 2))
     if workspace_headroom_gib < 0:
-        raise ValueError(
-            "vLLM gpu_workspace_headroom_gib must be non-negative"
-        )
+        raise ValueError("vLLM gpu_workspace_headroom_gib must be non-negative")
     effective_headroom_gib = headroom_gib + workspace_headroom_gib
     free_bytes, total_bytes = torch.cuda.mem_get_info()
     usable_bytes = free_bytes - int(effective_headroom_gib * 2**30)
@@ -185,7 +181,9 @@ def _resolve_gpu_memory_utilization(vllm_settings: dict[str, Any]) -> float:
 def _prompt(tokenizer, problem: str, config: dict[str, Any]) -> str:
     # Kept for callers that use the historical helper directly. New code
     # renders the complete normalized row so GPQA/AMC23 metadata is retained.
-    return render_evaluation_prompt(tokenizer, {"problem": problem, "metadata": {}}, config)
+    return render_evaluation_prompt(
+        tokenizer, {"problem": problem, "metadata": {}}, config
+    )
 
 
 def _release_vllm_engine(engine: Any) -> None:
@@ -238,7 +236,7 @@ def _evaluate_vllm_suite_impl(
     # initialized vLLM/CUDA runtime.
     from vllm import LLM, SamplingParams
 
-    ensure_extended_benchmark_specs(config)
+    config = ensure_extended_benchmark_specs(copy.deepcopy(config))
     model_path = Path(model_path).resolve()
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -342,16 +340,22 @@ def _evaluate_vllm_suite_impl(
     engine = None
     try:
         engine = LLM(**engine_kwargs)
+        stop_settings = {}
+        if config.get("models", {}).get("stop_token_ids") is not None or (
+            hasattr(tokenizer, "get_vocab") and "<end_of_turn>" in tokenizer.get_vocab()
+        ):
+            stop_settings["stop_token_ids"] = generation_stop_token_ids(
+                tokenizer, config
+            )
         sampling = SamplingParams(
             n=samples_per_problem,
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_new_tokens,
+            **stop_settings,
         )
         # One call produces one tqdm progress bar for all configured benchmarks.
-        generated = (
-            engine.generate(prompts, sampling, use_tqdm=True) if prompts else []
-        )
+        generated = engine.generate(prompts, sampling, use_tqdm=True) if prompts else []
     finally:
         # This is essential for sequential checkpoint re-evaluation in one
         # process. Training-time evaluation already gets process-level cleanup,
@@ -594,8 +598,7 @@ def merge_vllm_evaluation_shards(
         records, schema = loaded[benchmark]
         rows_by_rank = [
             read_prediction_rows(
-                shard
-                / Path(suite["benchmarks"][benchmark]["predictions"]).name
+                shard / Path(suite["benchmarks"][benchmark]["predictions"]).name
             )
             for shard, suite in zip(shard_paths, suites)
         ]
@@ -634,9 +637,7 @@ def merge_vllm_evaluation_shards(
             samples_per_problem, runtime_settings.get("metric")
         )
         row_scores = [
-            evaluation_problem_scores(
-                list(map(bool, row["correct"])), selected_metric
-            )
+            evaluation_problem_scores(list(map(bool, row["correct"])), selected_metric)
             for row in merged_rows
         ]
         problem_score_sum = sum(scores["selected"] for scores in row_scores)
@@ -656,12 +657,12 @@ def merge_vllm_evaluation_shards(
         if expected_parameters["metric"].startswith("pass@"):
             result["pass_at_k"] = result["accuracy"]
         if samples_per_problem == 8:
-            result["avg_at_8"] = sum(
-                scores["avg@8"] for scores in row_scores
-            ) / max(len(merged_rows), 1)
-            result["pass_at_8"] = sum(
-                scores["pass@8"] for scores in row_scores
-            ) / max(len(merged_rows), 1)
+            result["avg_at_8"] = sum(scores["avg@8"] for scores in row_scores) / max(
+                len(merged_rows), 1
+            )
+            result["pass_at_8"] = sum(scores["pass@8"] for scores in row_scores) / max(
+                len(merged_rows), 1
+            )
         merged_benchmarks[benchmark] = result
 
     detailed_rows_by_rank: list[list[dict[str, Any]]] = []
@@ -872,9 +873,7 @@ def evaluate_vllm_distributed(
     lock_timeout = float(
         runtime_settings.get(
             "gpu_lock_timeout_sec",
-            runtime_settings.get("vllm", {}).get(
-                "gpu_lock_timeout_sec", 24 * 60 * 60
-            ),
+            runtime_settings.get("vllm", {}).get("gpu_lock_timeout_sec", 24 * 60 * 60),
         )
     )
     if lock_timeout <= 0:
@@ -916,9 +915,7 @@ def evaluate_vllm_suite(
     lock_timeout = float(
         runtime_settings.get(
             "gpu_lock_timeout_sec",
-            runtime_settings.get("vllm", {}).get(
-                "gpu_lock_timeout_sec", 24 * 60 * 60
-            ),
+            runtime_settings.get("vllm", {}).get("gpu_lock_timeout_sec", 24 * 60 * 60),
         )
     )
     if lock_timeout <= 0:

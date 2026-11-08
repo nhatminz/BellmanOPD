@@ -7,3 +7,7 @@ outputs/
 results/
 configs/qwen3_b200_autotuned.yaml
 B200_VALIDATION.md
+.venv*/
+.cache/
+cache/
+*_cache/

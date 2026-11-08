@@ -12,10 +12,14 @@ from typing import Any
 
 import torch
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
-from .models import choose_attention_implementation, model_dtype_kwargs
+from .models import (
+    choose_model_attention_implementation,
+    generation_stop_token_ids,
+    model_dtype_kwargs,
+)
 from .math_prompts import render_math_prompt
 
 transformers_logging.disable_progress_bar()
@@ -59,7 +63,9 @@ def ensure_extended_benchmark_specs(config: dict[str, Any]) -> dict[str, Any]:
     """
     evaluation = config.setdefault("evaluation", {})
     specs = evaluation.setdefault("benchmarks", {})
-    root = Path(config.get("paths", {}).get("storage_root", "/workspace/storage-shared"))
+    root = Path(
+        config.get("paths", {}).get("storage_root", "/workspace/storage-shared")
+    )
     for name, default in EXTENDED_BENCHMARK_SPECS.items():
         if name in specs:
             continue
@@ -76,10 +82,11 @@ def ensure_extended_benchmark_specs(config: dict[str, Any]) -> dict[str, Any]:
         names = section.get("benchmark_names")
         if isinstance(names, (list, tuple)):
             section["benchmark_names"] = [
-                "AMC23" if str(name).casefold() == "ifeval" else name
-                for name in names
+                "AMC23" if str(name).casefold() == "ifeval" else name for name in names
             ]
     return config
+
+
 MODEL_ORDER = ("Base", "OPD", "TA-OPD", "RAC", "PGT", "CMT-OPD", "GRPO", "IW-OPD")
 
 
@@ -89,10 +96,14 @@ def configured_benchmark_names(
     """Return a validated canonical benchmark subset for this resolved config."""
     specs = config.get("evaluation", {}).get("benchmarks", {})
     configured = config.get("evaluation", {}).get("benchmark_names")
-    names = tuple(requested) if requested is not None else tuple(
-        configured
-        if configured is not None
-        else (name for name in BENCHMARK_ORDER if name in specs)
+    names = (
+        tuple(requested)
+        if requested is not None
+        else tuple(
+            configured
+            if configured is not None
+            else (name for name in BENCHMARK_ORDER if name in specs)
+        )
     )
     if not names:
         raise ValueError("Evaluation must configure at least one benchmark")
@@ -132,9 +143,7 @@ def evaluation_metric_name(
         except ValueError as error:
             raise ValueError(f"Invalid evaluation metric: {requested!r}") from error
         if k != samples:
-            raise ValueError(
-                f"avg@{k} requires num_responses={k}, got {samples}"
-            )
+            raise ValueError(f"avg@{k} requires num_responses={k}, got {samples}")
         return f"avg@{samples}"
     if normalized.startswith("pass@"):
         try:
@@ -142,9 +151,7 @@ def evaluation_metric_name(
         except ValueError as error:
             raise ValueError(f"Invalid evaluation metric: {requested!r}") from error
         if k <= 0 or k > samples:
-            raise ValueError(
-                f"pass@{k} requires 1 <= k <= num_responses={samples}"
-            )
+            raise ValueError(f"pass@{k} requires 1 <= k <= num_responses={samples}")
         return f"pass@{k}"
     if normalized == "accuracy" and samples == 1:
         return "accuracy"
@@ -612,8 +619,14 @@ def inspect_evaluation_data(config: dict[str, Any]) -> dict[str, Any]:
 
 def _load_eval_model(path: str | Path, config: dict[str, Any], device: torch.device):
     path = Path(path).resolve()
-    attention = choose_attention_implementation(
-        config["models"].get("attention_implementation", "auto")
+    attention = choose_model_attention_implementation(
+        AutoConfig.from_pretrained(
+            config["models"]["student_path"]
+            if (path / "adapter_config.json").is_file()
+            else path,
+            local_files_only=True,
+        ),
+        config["models"].get("attention_implementation", "auto"),
     )
     adapter_config = path / "adapter_config.json"
     if adapter_config.is_file():
@@ -761,9 +774,7 @@ def evaluate_loaded_suite(
     temperature = float(evaluation.get("temperature", 0.7))
     top_p = float(evaluation.get("top_p", 0.95))
     samples_per_problem = int(evaluation.get("num_responses", 8))
-    metric_name = evaluation_metric_name(
-        samples_per_problem, evaluation.get("metric")
-    )
+    metric_name = evaluation_metric_name(samples_per_problem, evaluation.get("metric"))
     seed = int(evaluation.get("seed", 1234))
     if temperature <= 0:
         raise ValueError("Sampled evaluation requires positive temperature")
@@ -858,7 +869,7 @@ def evaluate_loaded_suite(
                         "do_sample": do_sample,
                         "num_return_sequences": samples_per_problem,
                         "max_new_tokens": max_new_tokens,
-                        "eos_token_id": tokenizer.eos_token_id,
+                        "eos_token_id": generation_stop_token_ids(tokenizer, config),
                         "pad_token_id": tokenizer.pad_token_id,
                         "use_cache": True,
                         "temperature": temperature,

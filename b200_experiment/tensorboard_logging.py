@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from .training_cost import COST_TAGS
 
 
 BASE_TAGS = {
@@ -181,6 +182,13 @@ def production_tensorboard_metrics(
         for tag, field in BASE_TAGS.items()
         if field in metrics and metrics[field] is not None
     }
+    selected.update(
+        {
+            tag: float(metrics[field])
+            for tag, field in COST_TAGS.items()
+            if metrics.get(field) is not None
+        }
+    )
     selector = metrics.get("selector", {})
     if method == "ta":
         selected["ta/selected_token_fraction"] = float(selector["selected_fraction"])
