@@ -9,6 +9,7 @@ import socket
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -276,9 +277,9 @@ class VLLMRolloutEngine:
         if self.log_handle is not None:
             self.log_handle.flush()
         try:
-            tail = log_path.read_text(
-                encoding="utf-8", errors="replace"
-            ).splitlines()[-lines:]
+            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[
+                -lines:
+            ]
         except OSError as error:
             return f"<could not read server log: {error}>"
         return "\n".join(tail) or "<server log is empty>"
@@ -533,6 +534,57 @@ class VLLMRolloutEngine:
             pad_token_id,
             complete_log_probs,
         )
+
+    @contextmanager
+    def multiturn_session(self, model):
+        """Sync once per global episode batch; no collectives inside turns.
+
+        Ranks may finish different numbers of turns. Only the initial HF->vLLM
+        transfer is collective, so no early-terminating episode can strand an
+        FSDP rank in a per-turn synchronization.
+        """
+        if self.process is None:
+            raise RuntimeError("vLLM rollout server was not started")
+        started = time.perf_counter()
+        cache_released, release_seconds = self._release_torch_cache_if_needed()
+        self._wake_weights()
+        sync = self._sync_weights(model)
+        self._wake_kv_cache()
+        generated = time.perf_counter()
+        from .models import generation_stop_token_ids, load_student_tokenizer
+
+        tokenizer = load_student_tokenizer(self.config)
+        stops = generation_stop_token_ids(tokenizer, self.config)
+
+        def generate(prompt_ids, seed, budget):
+            try:
+                _, tokens, _ = self._generate_one(
+                    0,
+                    prompt_ids,
+                    max_new_tokens=budget,
+                    temperature=float(self.config["rollout"]["temperature"]),
+                    top_p=float(self.config["rollout"]["top_p"]),
+                    eos_token_ids=stops,
+                    seed=int(seed),
+                    return_log_probs=False,
+                )
+            except requests.exceptions.Timeout as error:
+                raise TimeoutError("Student multi-turn generation timed out") from error
+            return tokens
+
+        try:
+            yield generate
+        finally:
+            sleep_started = time.perf_counter()
+            self._sleep()
+            self.last_metrics = {
+                **sync,
+                "generation_time": sleep_started - generated,
+                "sleep_time": time.perf_counter() - sleep_started,
+                "torch_cache_released": float(cache_released),
+                "torch_cache_release_time": release_seconds,
+                "total_time": time.perf_counter() - started,
+            }
 
     def close(self) -> None:
         if self.closed:

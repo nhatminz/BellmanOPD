@@ -204,6 +204,13 @@ def generation_stop_token_ids(tokenizer, config: dict[str, Any]) -> list[int]:
         vocab = tokenizer.get_vocab() if hasattr(tokenizer, "get_vocab") else {}
         if "<end_of_turn>" in vocab:
             ids.append(vocab["<end_of_turn>"])
+        if config.get("alfworld", {}).get("enabled", False):
+            # Base Qwen/Llama tokenizers may assign EOS to end-of-text while
+            # the shared chat template closes assistant turns with another ID.
+            # Interactive actions must stop at that native turn boundary too.
+            for token in ("<|im_end|>", "<|eot_id|>"):
+                if token in vocab:
+                    ids.append(vocab[token])
     if not ids or any(not isinstance(value, int) or value < 0 for value in ids):
         raise ValueError(f"Invalid generation stop token IDs: {ids}")
     return list(dict.fromkeys(ids))

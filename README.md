@@ -1,5 +1,8 @@
 # Pure OPD vs TA-OPD vs CMT vs GRPO trên NVIDIA B200
 
+Train/eval ALFWorld multi-turn thật với CMT/OPD/TA/IW, teacher Qwen3-4B và student
+Qwen3-1.7B: [`ALFWORLD_MULTITURN.md`](ALFWORLD_MULTITURN.md).
+
 Launcher Gemma độc lập theo từng method, xử lý OOM backward và resume run cũ:
 [`RUN_GEMMA_OOM_RESUME_B200.md`](RUN_GEMMA_OOM_RESUME_B200.md).
 

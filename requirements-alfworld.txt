@@ -1,0 +1,3 @@
+# Optional simulator dependencies; keep the existing B200 training environment.
+# Source builds require a C/C++ compiler, CMake and make on PATH.
+textworld[pddl]>=1.6.1,<1.8

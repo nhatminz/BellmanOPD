@@ -878,6 +878,11 @@ def validate_resume_config(
     keys = (
         "experiment.method",
         "experiment.seed",
+        "alfworld.enabled",
+        "alfworld.protocol_version",
+        "alfworld.max_turns",
+        "alfworld.max_turn_tokens",
+        "alfworld.max_episode_tokens",
         "distributed.strategy",
         "models.student_path",
         "models.teacher_path",

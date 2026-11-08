@@ -190,6 +190,13 @@ def production_tensorboard_metrics(
         }
     )
     selector = metrics.get("selector", {})
+    selected.update(
+        {
+            f"alfworld/{key}": float(value)
+            for key, value in metrics.get("alfworld", {}).items()
+            if isinstance(value, (int, float))
+        }
+    )
     if method == "ta":
         selected["ta/selected_token_fraction"] = float(selector["selected_fraction"])
         selected.update(

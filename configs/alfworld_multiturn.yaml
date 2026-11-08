@@ -1,0 +1,74 @@
+_base_: qwen3_b200_cmt.yaml
+
+experiment:
+  method: cmt
+  output_dir: outputs/alfworld_cmt/cmt_opd
+
+models:
+  teacher_path: models/Qwen3-4B
+  student_path: nlp/tungdd11/stable-on-policy-distillation/OPD/model/Qwen3-1.7B-Base
+
+data:
+  path: nlp/minhpn19/data/ALFworld/train-00000-of-00001.parquet
+  prompt_key: id
+  split: null
+
+alfworld:
+  enabled: true
+  protocol_version: 1
+  eval_paths:
+    eval_in_distribution: nlp/minhpn19/data/ALFworld/eval_in_distribution-00000-of-00001.parquet
+    eval_out_of_distribution: nlp/minhpn19/data/ALFworld/eval_out_of_distribution-00000-of-00001.parquet
+  game_cache_dir: nlp/minhpn19/data/ALFworld/.textworld_games
+  max_turns: 30
+  max_turn_tokens: 128
+  # Includes initial task, native chat envelopes, actions AND observations.
+  # Stop before exceeding the budget; never truncate interaction history.
+  max_episode_tokens: 8192
+  env_workers: 4
+  env_timeout_sec: 60
+  trace_token_ids: true
+
+rollout:
+  batch_size: 8
+  num_responses: 4
+  # Cumulative actor-token cap per episode (not per turn).
+  max_new_tokens: 3840
+  temperature: 1.0
+  top_p: 1.0
+  vllm:
+    gpu_memory_utilization: 0.40
+    max_model_len: 8192
+    max_num_seqs: 8
+    max_concurrent_requests: 8
+
+selector:
+  score_micro_batch_size: 1
+
+iw_opd:
+  enabled: true
+  weight_max: 1.5
+  use_abs: true
+  eps: 1.0e-8
+
+training:
+  epochs: 1
+  max_steps: 1000
+  learning_rate: 5.0e-6
+  micro_batch_size_per_gpu: 1
+  ppo_mini_batch_size: 8
+  save_interval: 50
+
+# ALFWorld evaluation always runs separately, with fresh simulator episodes.
+training_evaluation:
+  enabled: false
+  eval_at_start: false
+  eval_at_end: false
+
+evaluation:
+  temperature: 1.0
+  top_p: 1.0
+  num_responses: 1
+  vllm:
+    max_model_len: 8192
+    max_num_seqs: 16

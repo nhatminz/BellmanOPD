@@ -64,6 +64,8 @@ def comparison_signature(config: dict[str, Any], world_size: int) -> str:
             )
         },
     }
+    if config.get("alfworld", {}).get("enabled", False):
+        payload["alfworld"] = config["alfworld"]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 

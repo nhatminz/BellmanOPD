@@ -76,6 +76,12 @@ def resolve_runtime_paths(config: dict[str, Any]) -> dict[str, Any]:
     result["data"]["path"] = resolved(result["data"]["path"])
     for benchmark in result.get("evaluation", {}).get("benchmarks", {}).values():
         benchmark["path"] = resolved(benchmark["path"])
+    if result.get("alfworld", {}).get("enabled", False):
+        alfworld = result["alfworld"]
+        alfworld["eval_paths"] = {
+            name: resolved(path) for name, path in alfworld["eval_paths"].items()
+        }
+        alfworld["game_cache_dir"] = resolved(alfworld["game_cache_dir"])
     result.setdefault("paths", {})["storage_root"] = str(root.resolve())
     return result
 

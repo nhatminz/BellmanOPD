@@ -111,10 +111,10 @@ from .resume import (
 from .scoring import (
     cuda_sync,
     generate_on_policy,
-    position_ids_from_mask,
     score_original_rollout,
     score_student_teacher_rollout,
-    supports_response_only_logits,
+    rollout_forward_inputs,
+    select_rollout_logits,
 )
 from .selector_logging import (
     CMTTokenAuditLogger,
@@ -2092,30 +2092,16 @@ def _opd_train_step(
                 local_width = int(
                     response_lengths.index_select(0, chunk_indices).max().item()
                 )
-                start = rollout.prompt_width - 1
-                input_stop = start + local_width
-                input_ids = rollout.input_ids.index_select(0, chunk_indices)[
-                    :, :input_stop
-                ]
-                attention_mask = rollout.attention_mask.index_select(0, chunk_indices)[
-                    :, :input_stop
-                ]
-                forward_kwargs = {
-                    "input_ids": input_ids,
-                    "attention_mask": attention_mask,
-                    "position_ids": position_ids_from_mask(attention_mask),
-                    "use_cache": False,
-                    "return_dict": True,
-                }
-                response_only_logits = supports_response_only_logits(model)
-                if response_only_logits:
-                    forward_kwargs["logits_to_keep"] = local_width
-                output = model(**forward_kwargs)
-                logits = (
-                    output.logits[:, -local_width:]
-                    if response_only_logits
-                    else output.logits[:, start : start + local_width]
+                forward_kwargs, selection = rollout_forward_inputs(
+                    model,
+                    rollout,
+                    chunk_indices,
+                    local_width,
                 )
+                input_ids = forward_kwargs["input_ids"]
+                attention_mask = forward_kwargs["attention_mask"]
+                output = model(**forward_kwargs)
+                logits = select_rollout_logits(output.logits, selection)
                 candidate_ids = opd_reference.candidate_ids.index_select(
                     0, chunk_indices
                 )[:, :local_width]
@@ -3348,6 +3334,32 @@ def run_training(
     torch.backends.cuda.matmul.allow_tf32 = True
     experiment, training = config["experiment"], config["training"]
     strategy = distributed_strategy(config, distributed)
+    is_alfworld = bool(config.get("alfworld", {}).get("enabled", False))
+    if is_alfworld:
+        from .alfworld_rollout import generate_training_episodes
+        from .alfworld_env import load_task_splits
+
+        if config["experiment"]["method"] not in {"cmt", "opd", "ta", "iw"}:
+            raise ValueError("ALFWorld supports cmt/opd/ta/iw only")
+        if (
+            distributed.world_size > 1
+            and config["rollout"].get("backend", "vllm") != "vllm"
+        ):
+            raise ValueError(
+                "Multi-GPU ALFWorld requires vLLM; HF interactive rollout is a single-process debug path"
+            )
+        if config.get("training_evaluation", {}).get("enabled", False):
+            raise ValueError(
+                "ALFWorld evaluation is separate: disable training_evaluation and use eval_alfworld_multiseed.sh"
+            )
+        if (
+            not 0
+            < int(config["alfworld"]["max_episode_tokens"])
+            <= int(config["rollout"]["vllm"]["max_model_len"])
+        ):
+            raise ValueError(
+                "ALFWorld max_episode_tokens must fit rollout.vllm.max_model_len"
+            )
     method = str(experiment["method"]).lower()
     if method not in {"opd", "ta", "rac", "pgt", "cmt", "grpo", "iw"}:
         raise ValueError(
@@ -3527,19 +3539,42 @@ def run_training(
         disable=not distributed.is_main,
     )
     setup_progress.set_postfix_str("stage=load-data", refresh=True)
-    records, data_files = read_records(
-        config["data"]["path"], split=config["data"].get("split")
-    )
-    if not records:
-        raise ValueError("Configured training dataset is empty")
-    validate_prompt_records(records, config["data"])
-    original_record_count = len(records)
-    prompt_tokenizer = load_student_tokenizer(config)
-    records, prompt_filter_summary = filter_overlong_prompt_records(
-        records, prompt_tokenizer, config["data"]
-    )
-    del prompt_tokenizer
-    if distributed.is_main:
+    if is_alfworld:
+        task_splits = load_task_splits(config)
+        records = task_splits["train"]
+        data_files = [Path(config["data"]["path"])]
+        original_record_count = len(records)
+        prompt_filter_summary = {
+            "original_count": len(records),
+            "kept_count": len(records),
+            "max_prompt_tokens": config["alfworld"]["max_episode_tokens"],
+            "filtered_overlong_count": 0,
+            "filtered_overlong_percentage": 0,
+            "maximum_observed_prompt_length": 0,
+            "policy": "full-history stop-at-context-budget; no token truncation",
+        }
+        del task_splits  # eval tasks are never passed to the optimizer/collector
+    else:
+        records, data_files = read_records(
+            config["data"]["path"], split=config["data"].get("split")
+        )
+        if not records:
+            raise ValueError("Configured training dataset is empty")
+        validate_prompt_records(records, config["data"])
+        original_record_count = len(records)
+        prompt_tokenizer = load_student_tokenizer(config)
+        records, prompt_filter_summary = filter_overlong_prompt_records(
+            records, prompt_tokenizer, config["data"]
+        )
+        del prompt_tokenizer
+    if distributed.is_main and is_alfworld:
+        tqdm.write(
+            f"ALFWorld training tasks: {len(records)} (ID/OOD excluded from optimization)"
+        )
+        tqdm.write(
+            f"Full-history episodes, max_turns={config['alfworld']['max_turns']}, context budget={config['alfworld']['max_episode_tokens']} tokens"
+        )
+    elif distributed.is_main:
         tqdm.write(f"Dataset examples: {prompt_filter_summary['original_count']}")
         tqdm.write(f"Kept: {prompt_filter_summary['kept_count']}")
         tqdm.write(
@@ -3732,7 +3767,7 @@ def run_training(
         save_metadata(metadata, output_dir, filename=metadata_filename)
     setup_progress.update(1)
     setup_progress.close()
-    if distributed.is_main:
+    if distributed.is_main and not is_alfworld:
         rendered_train_prompt = render_record_prompt(
             records[0], tokenizer, config["data"]
         )
@@ -3963,39 +3998,124 @@ def run_training(
             distributed.world_size,
         )
         prompt_records = [records[index] for index in prompt_indices]
-        encoded, _ = tokenize_prompts(prompt_records, tokenizer, config["data"], device)
-        encoded, indices, response_indices = expand_prompt_batch(
-            encoded, prompt_indices, num_responses
-        )
-        active_trajectories = torch.tensor(
-            [active for active in active_prompts for _ in range(num_responses)],
-            dtype=torch.bool,
-            device=device,
-        )
-        batch_records = [records[index] for index in indices]
-        rollout_function = (
-            rollout_engine.generate
-            if rollout_engine is not None
-            else generate_on_policy
-        )
-        rollout, rollout_time = _timed(
-            device,
-            rollout_function,
-            training_student,
-            encoded["input_ids"],
-            encoded["attention_mask"],
-            max_new_tokens=int(config["rollout"].get("max_new_tokens", 256)),
-            temperature=float(config["rollout"].get("temperature", 1.0)),
-            top_p=float(config["rollout"].get("top_p", 1.0)),
-            eos_token_ids=generation_stop_token_ids(tokenizer, config),
-            pad_token_id=tokenizer.pad_token_id,
-            seed=int(config["rollout"].get("seed", seed)),
-            # Repeated prompts are separate requests with globally unique,
-            # deterministic seeds, so all n trajectories are independent.
-            sample_seed_offset=(
-                rollout_index * batch_size * num_responses + local_start * num_responses
-            ),
-        )
+        if is_alfworld:
+            encoded = None
+            indices = [i for i in prompt_indices for _ in range(num_responses)]
+            response_indices = [j for _ in prompt_indices for j in range(num_responses)]
+            active_trajectories = torch.tensor(
+                [active for active in active_prompts for _ in range(num_responses)],
+                dtype=torch.bool,
+                device=device,
+            )
+            batch_records = [records[i] for i in indices]
+            episode_seeds = [
+                int(config["rollout"].get("seed", seed))
+                + rollout_index * batch_size * num_responses
+                + local_start * num_responses
+                + j
+                for j in range(len(batch_records))
+            ]
+            rollout, rollout_time = _timed(
+                device,
+                generate_training_episodes,
+                training_student,
+                rollout_engine,
+                batch_records,
+                tokenizer,
+                config,
+                device,
+                episode_seeds,
+            )
+            import uuid
+
+            episode_dir = (
+                output_dir / "alfworld_episodes" / f"rank-{distributed.rank:05d}"
+            )
+            episode_dir.mkdir(parents=True, exist_ok=True)
+            episode_file = (
+                episode_dir
+                / f"rollout-{rollout_index:06d}-step-{rollout_first_optimizer_step:06d}-{uuid.uuid4().hex[:10]}.jsonl"
+            )
+            with episode_file.open("x", encoding="utf-8") as handle:
+                for active, trace in zip(
+                    active_trajectories.tolist(), rollout.episode_traces
+                ):
+                    if active:
+                        handle.write(
+                            json.dumps(
+                                {
+                                    **trace,
+                                    "rollout_index": rollout_index,
+                                    "first_optimizer_step": rollout_first_optimizer_step,
+                                }
+                            )
+                            + "\n"
+                        )
+            local_episode_stats = {
+                "episodes": sum(active_trajectories.tolist()),
+                "successes": sum(
+                    t["success"]
+                    for active, t in zip(
+                        active_trajectories.tolist(), rollout.episode_traces
+                    )
+                    if active
+                ),
+                "turns": sum(
+                    len(t["turns"])
+                    for active, t in zip(
+                        active_trajectories.tolist(), rollout.episode_traces
+                    )
+                    if active
+                ),
+                "invalid_actions": sum(
+                    t["invalid_actions"]
+                    for active, t in zip(
+                        active_trajectories.tolist(), rollout.episode_traces
+                    )
+                    if active
+                ),
+            }
+            episode_stats = {
+                key: distributed.sum_int(value)
+                for key, value in local_episode_stats.items()
+            }
+        else:
+            encoded, _ = tokenize_prompts(
+                prompt_records, tokenizer, config["data"], device
+            )
+            encoded, indices, response_indices = expand_prompt_batch(
+                encoded, prompt_indices, num_responses
+            )
+            active_trajectories = torch.tensor(
+                [active for active in active_prompts for _ in range(num_responses)],
+                dtype=torch.bool,
+                device=device,
+            )
+            batch_records = [records[index] for index in indices]
+            rollout_function = (
+                rollout_engine.generate
+                if rollout_engine is not None
+                else generate_on_policy
+            )
+            rollout, rollout_time = _timed(
+                device,
+                rollout_function,
+                training_student,
+                encoded["input_ids"],
+                encoded["attention_mask"],
+                max_new_tokens=int(config["rollout"].get("max_new_tokens", 256)),
+                temperature=float(config["rollout"].get("temperature", 1.0)),
+                top_p=float(config["rollout"].get("top_p", 1.0)),
+                eos_token_ids=generation_stop_token_ids(tokenizer, config),
+                pad_token_id=tokenizer.pad_token_id,
+                seed=int(config["rollout"].get("seed", seed)),
+                # Repeated prompts are separate requests with globally unique,
+                # deterministic seeds, so all n trajectories are independent.
+                sample_seed_offset=(
+                    rollout_index * batch_size * num_responses
+                    + local_start * num_responses
+                ),
+            )
         rollout_backend_metrics = (
             dict(rollout_engine.last_metrics) if rollout_engine is not None else {}
         )
@@ -4934,6 +5054,22 @@ def run_training(
             "rollout_first_optimizer_step": rollout_first_optimizer_step,
             "rollout_last_optimizer_step": step,
             "method": method,
+            **(
+                {
+                    "alfworld": {
+                        **episode_stats,
+                        "success_rate": episode_stats["successes"]
+                        / max(episode_stats["episodes"], 1),
+                        "average_turns": episode_stats["turns"]
+                        / max(episode_stats["episodes"], 1),
+                        "invalid_action_rate": episode_stats["invalid_actions"]
+                        / max(episode_stats["turns"], 1),
+                        "episode_trace": str(episode_file),
+                    }
+                }
+                if is_alfworld
+                else {}
+            ),
             "resumed_from": (
                 str(resume_state.checkpoint) if resume_state is not None else None
             ),

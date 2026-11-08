@@ -37,6 +37,64 @@ class RolloutBatch:
     valid_mask: torch.Tensor
     rollout_log_probs: torch.Tensor
     prompt_width: int
+    # Multi-turn episodes keep observations in input_ids, while the response
+    # axis is the ordered sequence of student decisions only. Values are the
+    # physical indices of those actor tokens in input_ids (not logit indices).
+    actor_positions: torch.Tensor | None = None
+    actor_token_mask: torch.Tensor | None = None
+    episode_traces: list[dict] | None = None
+
+
+def rollout_forward_inputs(
+    model, rollout, indices, width, *, trim_padding=True, keep_cache=False
+):
+    """One causal indexing implementation for scoring and differentiable loss."""
+    if rollout.actor_positions is None:
+        start = rollout.prompt_width - 1
+        stop = start + width if trim_padding and not keep_cache else None
+        ids = rollout.input_ids.index_select(0, indices)[:, :stop]
+        mask = rollout.attention_mask.index_select(0, indices)[:, :stop]
+        response_only = stop is not None and supports_response_only_logits(model)
+        selection = ("suffix" if response_only else "slice", start, width)
+        keep = width if response_only else None
+    else:
+        if keep_cache:
+            raise ValueError(
+                "Multi-turn actor-position scoring cannot retain generation KV cache"
+            )
+        positions = rollout.actor_positions.index_select(0, indices)[:, :width]
+        valid = rollout.valid_mask.index_select(0, indices)[:, :width]
+        if bool((positions[valid] <= 0).any()):
+            raise ValueError("Every actor token needs a preceding causal context token")
+        stop = int(positions[valid].max().item())
+        ids = rollout.input_ids.index_select(0, indices)[:, :stop]
+        mask = rollout.attention_mask.index_select(0, indices)[:, :stop]
+        predictors = torch.where(valid, positions - 1, torch.zeros_like(positions))
+        if supports_response_only_logits(model):
+            keep = torch.unique(predictors, sorted=True)
+            selection = ("gather", torch.searchsorted(keep, predictors), width)
+        else:
+            keep = None
+            selection = ("gather", predictors, width)
+    kwargs = {
+        "input_ids": ids,
+        "attention_mask": mask,
+        "position_ids": position_ids_from_mask(mask),
+        "use_cache": keep_cache,
+        "return_dict": True,
+    }
+    if keep is not None:
+        kwargs["logits_to_keep"] = keep
+    return kwargs, selection
+
+
+def select_rollout_logits(logits, selection):
+    kind, positions, width = selection
+    if kind == "suffix":
+        return logits[:, -width:]
+    if kind == "slice":
+        return logits[:, positions : positions + width]
+    return logits.gather(1, positions.unsqueeze(-1).expand(-1, -1, logits.shape[-1]))
 
 
 @torch.inference_mode()
@@ -329,7 +387,6 @@ def score_original_rollout(
     if temperature <= 0:
         raise ValueError("Scoring temperature must be positive")
     model.eval()
-    start = rollout.prompt_width - 1
     width = rollout.response_ids.shape[1]
     batch_size = rollout.input_ids.shape[0]
     score_micro_batch = (
@@ -359,34 +416,17 @@ def score_original_rollout(
         local_width = width
         if trim_padding and not keep_cache:
             local_width = int(response_lengths.index_select(0, indices).max().item())
-        # To score W response tokens we only need the prompt and the first W-1
-        # response inputs. The final sampled token and every post-EOS pad token
-        # cannot affect any requested causal logit.
-        input_stop = start + local_width if trim_padding and not keep_cache else None
-        input_ids = rollout.input_ids.index_select(0, indices)[:, :input_stop]
-        attention_mask = rollout.attention_mask.index_select(0, indices)[:, :input_stop]
+        forward_kwargs, selection = rollout_forward_inputs(
+            model,
+            rollout,
+            indices,
+            local_width,
+            trim_padding=trim_padding,
+            keep_cache=keep_cache,
+        )
         response_ids = rollout.response_ids.index_select(0, indices)[:, :local_width]
-        forward_kwargs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids_from_mask(attention_mask),
-            "use_cache": keep_cache,
-            "return_dict": True,
-        }
-        response_only_logits = input_stop is not None and supports_response_only_logits(
-            model
-        )
-        if response_only_logits:
-            forward_kwargs["logits_to_keep"] = local_width
-        output = model(
-            **forward_kwargs,
-        )
-        # Keep model dtype (BF16 on B200); FP32 reductions are chunked over time.
-        response_logits_view = (
-            output.logits[:, -local_width:, :]
-            if response_only_logits
-            else output.logits[:, start : start + local_width, :]
-        )
+        output = model(**forward_kwargs)
+        response_logits_view = select_rollout_logits(output.logits, selection)
         if response_logits_view.shape[1] != local_width:
             raise RuntimeError("Model did not return every requested response logit")
         local_candidate_ids = (
@@ -482,7 +522,6 @@ def score_student_teacher_rollout(
         raise ValueError("top_k must be positive")
     student.eval()
     teacher.eval()
-    start = rollout.prompt_width - 1
     width = rollout.response_ids.shape[1]
     batch_size = rollout.input_ids.shape[0]
     score_micro_batch = (
@@ -521,30 +560,16 @@ def score_student_teacher_rollout(
         local_width = width
         if trim_padding:
             local_width = int(response_lengths.index_select(0, indices).max().item())
-        input_stop = start + local_width if trim_padding else None
-        input_ids = rollout.input_ids.index_select(0, indices)[:, :input_stop]
-        attention_mask = rollout.attention_mask.index_select(0, indices)[:, :input_stop]
         response_ids = rollout.response_ids.index_select(0, indices)[:, :local_width]
-        common_kwargs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids_from_mask(attention_mask),
-            "use_cache": False,
-            "return_dict": True,
-        }
-
-        student_kwargs = dict(common_kwargs)
-        student_response_only = (
-            input_stop is not None and supports_response_only_logits(student)
+        student_kwargs, student_selection = rollout_forward_inputs(
+            student,
+            rollout,
+            indices,
+            local_width,
+            trim_padding=trim_padding,
         )
-        if student_response_only:
-            student_kwargs["logits_to_keep"] = local_width
         student_output = student(**student_kwargs)
-        student_logits = (
-            student_output.logits[:, -local_width:, :]
-            if student_response_only
-            else student_output.logits[:, start : start + local_width, :]
-        )
+        student_logits = select_rollout_logits(student_output.logits, student_selection)
         student_local = _reduce_response_logits(
             student_logits,
             response_ids,
@@ -557,18 +582,15 @@ def score_student_teacher_rollout(
         if student_local.top_k_ids is None:
             raise AssertionError("Student joint scoring did not produce Top-K IDs")
 
-        teacher_kwargs = dict(common_kwargs)
-        teacher_response_only = (
-            input_stop is not None and supports_response_only_logits(teacher)
+        teacher_kwargs, teacher_selection = rollout_forward_inputs(
+            teacher,
+            rollout,
+            indices,
+            local_width,
+            trim_padding=trim_padding,
         )
-        if teacher_response_only:
-            teacher_kwargs["logits_to_keep"] = local_width
         teacher_output = teacher(**teacher_kwargs)
-        teacher_logits = (
-            teacher_output.logits[:, -local_width:, :]
-            if teacher_response_only
-            else teacher_output.logits[:, start : start + local_width, :]
-        )
+        teacher_logits = select_rollout_logits(teacher_output.logits, teacher_selection)
         teacher_local = _reduce_response_logits(
             teacher_logits,
             response_ids,
