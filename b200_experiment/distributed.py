@@ -327,8 +327,8 @@ def grouped_ppo_minibatch_partition(
     """Partition one global PPO minibatch in group-major order.
 
     ``group_ids_by_rank[r][i]`` identifies the rollout/response index of local
-    trajectory ``i`` on rank ``r``.  The global order is stable group-major,
-    then rank-major, then local-row-major.  Thus, when a rollout contains one
+    trajectory ``i`` on rank ``r``. The global order is stable group-major,
+    then rank-interleaved within each group. Thus, when a rollout contains one
     row for every ``(prompt, response_index)`` pair and the PPO size equals the
     prompt batch size, each PPO minibatch contains exactly one response from
     every prompt.
@@ -367,12 +367,18 @@ def grouped_ppo_minibatch_partition(
 
     order: list[tuple[int, int]] = []
     for group_id in group_order:
-        for owner, values in enumerate(grouped):
-            order.extend(
-                (owner, local_position)
-                for local_position, value in enumerate(values)
-                if value == group_id
-            )
+        rows_by_rank = [
+            [position for position, value in enumerate(values) if value == group_id]
+            for values in grouped
+        ]
+        # A response group may span several PPO updates. Interleaving keeps
+        # those smaller updates shared across ranks instead of putting one
+        # entire update on rank 0. Group membership and each rank's local row
+        # order stay unchanged when PPO size covers a complete response group.
+        for offset in range(max(map(len, rows_by_rank))):
+            for owner, rows in enumerate(rows_by_rank):
+                if offset < len(rows):
+                    order.append((owner, rows[offset]))
     if len(order) != total:
         raise AssertionError("Grouped PPO order is not a permutation of trajectories")
 

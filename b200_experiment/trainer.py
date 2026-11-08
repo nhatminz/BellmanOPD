@@ -1952,8 +1952,9 @@ def _opd_train_step(
         local_minibatch_count = len(local_indices)
         if distributed.any(local_minibatch_count == 0):
             raise ValueError(
-                "Global PPO minibatch has no real trajectory on rank "
-                f"{distributed.rank}: minibatch={ppo_index}, counts={counts}, "
+                "At least one rank has no real trajectory in this global PPO minibatch: "
+                f"rank={distributed.rank}, local_rows={local_minibatch_count}, "
+                f"minibatch={ppo_index}, counts={counts}, "
                 f"global_ppo_mini_batch_size={ppo_size}. Reduce world size or "
                 "choose a PPO batch/data tail that gives every rank a real row."
             )
@@ -3554,6 +3555,19 @@ def run_training(
             "policy": "full-history stop-at-context-budget; no token truncation",
         }
         del task_splits  # eval tasks are never passed to the optimizer/collector
+        # Check the actual simulator ABI on every worker's node before loading
+        # HF/vLLM weights. Shared venvs can contain a libdownward.so built on a
+        # different machine even when the dataset and Python packages exist.
+        from .alfworld_env import EnvironmentClient
+
+        setup_progress.set_postfix_str("stage=check-alfworld-simulator", refresh=True)
+        check_env = EnvironmentClient(records[0], config["alfworld"])
+        try:
+            check_env.reset(seed)
+            check_env.step("look")
+        finally:
+            check_env.close()
+        distributed.barrier()
     else:
         records, data_files = read_records(
             config["data"]["path"], split=config["data"].get("split")

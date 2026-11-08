@@ -1,5 +1,9 @@
 # ALFWorld multi-turn OPD trên B200
 
+Nếu CMT lỗi `Global PPO minibatch has no real trajectory` hoặc simulator lỗi
+`GLIBCXX_3.4.32`, xem [ALFWORLD_FIX_CMT_RUNTIME.md](ALFWORLD_FIX_CMT_RUNTIME.md)
+cho bản sửa và lệnh chạy cặp Qwen3-14B → Qwen3-4B trên 2 GPU.
+
 Pipeline này dùng **simulator TextWorld PDDL thật** để reset/step từng game ALFWorld.
 Student sinh mọi lượt; teacher được freeze và chỉ chấm các prefix student đã đi qua.
 Train/eval dùng chung giao thức action và lịch sử đầy đủ. Eval chạy riêng trên ID/OOD.

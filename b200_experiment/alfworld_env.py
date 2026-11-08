@@ -10,7 +10,9 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import select
+import socket
 import subprocess
 import sys
 import tempfile
@@ -22,6 +24,41 @@ SPLITS = ("train", "eval_in_distribution", "eval_out_of_distribution")
 
 class EnvironmentSetupError(RuntimeError):
     pass
+
+
+def native_site_path():
+    """Optional Fast Downward build for this host/Python, outside shared venvs."""
+    explicit = os.environ.get("ALFWORLD_NATIVE_SITE")
+    if explicit:
+        # Do not resolve the last symlink: rebuilds atomically replace it.
+        return Path(explicit).expanduser().absolute()
+    hostname = re.sub(r"[^A-Za-z0-9_.-]", "_", socket.gethostname())
+    return (
+        Path(__file__).resolve().parents[1]
+        / ".alfworld-native"
+        / hostname
+        / sys.implementation.cache_tag
+    )
+
+
+def configure_native_site():
+    site = native_site_path()
+    if not (site / "fast_downward/libdownward.so").is_file():
+        if os.environ.get("ALFWORLD_NATIVE_SITE"):
+            raise EnvironmentSetupError(
+                f"ALFWORLD_NATIVE_SITE has no fast_downward/libdownward.so: {site}. Run bash scripts/rebuild_alfworld_native.sh on this node."
+            )
+        return None
+    loaded = sys.modules.get("fast_downward")
+    if loaded is not None and not Path(loaded.__file__).resolve().is_relative_to(
+        site.resolve()
+    ):
+        raise EnvironmentSetupError(
+            "Fast Downward is already imported from another location. Restart this Python process to use the host-local ALFWorld native build."
+        )
+    if str(site) not in sys.path:
+        sys.path.insert(0, str(site))
+    return site
 
 
 def validate_settings(config):
@@ -160,6 +197,7 @@ class NativeEnvironment:
 
     def reset(self, game_file, seed):
         self.close()
+        self.native_site = configure_native_site()
         try:
             import textworld
         except ImportError as error:
@@ -207,8 +245,13 @@ class NativeEnvironment:
             self.state = self.env.reset()
         except Exception as error:
             self.close()
+            hint = (
+                "Native C++ runtime mismatch (GLIBCXX/CXXABI). Run bash scripts/rebuild_alfworld_native.sh on THIS node, then python3 -m b200_experiment.alfworld_cli smoke. The isolated build does not replace the shared training venv."
+                if any(name in str(error) for name in ("GLIBCXX_", "CXXABI_"))
+                else "Verify TextWorld PDDL/Fast Downward installation; run the readiness smoke test."
+            )
             raise EnvironmentSetupError(
-                f"Cannot initialize real ALFWorld game {game_file}: {error}. Verify TextWorld PDDL/Fast Downward installation; run the readiness smoke test."
+                f"Cannot initialize real ALFWorld game {game_file}: {error}. {hint}"
             ) from error
         return self._observation(0.0, False)
 
@@ -219,6 +262,7 @@ class NativeEnvironment:
             "terminated": bool(done or self.state.won or self.state.lost),
             "success": bool(self.state.won),
             "admissible_actions": list(self.state.admissible_commands or []),
+            "native_site": str(self.native_site) if self.native_site else None,
         }
 
     def step(self, action):
@@ -314,6 +358,9 @@ def worker_main():
 
 
 if __name__ == "__main__":
-    if "--worker" not in sys.argv:
+    if sys.argv[1:] == ["--native-site"]:
+        print(native_site_path())
+    elif sys.argv[1:] == ["--worker"]:
+        worker_main()
+    else:
         raise SystemExit("Use python3 -m b200_experiment.alfworld_cli ready/smoke")
-    worker_main()

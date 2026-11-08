@@ -55,7 +55,8 @@ def collect_metadata(repo_root, command_line, model_metadata, data_path, data_fi
     hashes = {}
     for path in root.rglob("*"):
         if not path.is_file() or any(
-            part in {"outputs", "results", "__pycache__", ".git"} for part in path.parts
+            part in {"outputs", "results", "__pycache__", ".git", ".alfworld-native"}
+            for part in path.parts
         ):
             continue
         if path.suffix in {".py", ".sh", ".yaml", ".md", ".txt"}:

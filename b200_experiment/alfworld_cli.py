@@ -49,6 +49,7 @@ def readiness(config, split="eval_in_distribution", task_index=0, *, smoke=False
             "look_observation": result["observation"],
             "admissible_actions": len(result["admissible_actions"]),
             "backend": "TextWorld PDDL, real subprocess reset/step",
+            "native_site": initial.get("native_site"),
         }
     finally:
         env.close()

@@ -193,7 +193,8 @@ def test_vllm_multi_turn_syncs_once_for_variable_length_episodes(
     assert calls == ["wake_weights", "sync", "wake_kv", "sleep"]
 
 
-def test_four_launchers_share_workload_and_resolve_b200_paths(tmp_path):
+@pytest.mark.parametrize("large_pair", [False, True])
+def test_four_launchers_share_workload_and_resolve_b200_paths(tmp_path, large_pair):
     from b200_experiment.cli import _configured, build_parser
     from b200_experiment.training_cost import comparison_signature
 
@@ -213,12 +214,17 @@ def test_four_launchers_share_workload_and_resolve_b200_paths(tmp_path):
         "PYTHON_BIN": str(executable),
         "CAPTURE": str(capture),
         "RUN_NAME": "fair_alfworld",
-        "CUDA_VISIBLE_DEVICES": "0,1,2,3",
+        "CUDA_VISIBLE_DEVICES": "0,1" if large_pair else "0,1,2,3",
         "STORAGE_ROOT": "/workspace/storage-shared",
     }
+    launcher = (
+        "train_alfworld_multiturn_14b.sh"
+        if large_pair
+        else "train_alfworld_multiturn.sh"
+    )
     for method in ["cmt", "opd", "ta", "iw"]:
         result = subprocess.run(
-            ["bash", str(repo / "scripts/train_alfworld_multiturn.sh"), method],
+            ["bash", str(repo / "scripts" / launcher), method],
             env=env,
             cwd=repo,
             capture_output=True,
@@ -229,7 +235,8 @@ def test_four_launchers_share_workload_and_resolve_b200_paths(tmp_path):
     configs = [
         _configured(build_parser().parse_args(c[c.index("train") :])) for c in commands
     ]
-    assert len({comparison_signature(c, 4) for c in configs}) == 1
+    world_size = 2 if large_pair else 4
+    assert len({comparison_signature(c, world_size) for c in configs}) == 1
     for method, config in zip(["cmt", "opd", "ta", "iw"], configs):
         assert config["experiment"]["method"] == method
         assert config["experiment"]["output_dir"].endswith(
@@ -239,10 +246,21 @@ def test_four_launchers_share_workload_and_resolve_b200_paths(tmp_path):
             config["data"]["path"]
             == "/workspace/storage-shared/nlp/minhpn19/data/ALFworld/train-00000-of-00001.parquet"
         )
-        assert (
-            config["models"]["teacher_path"]
-            == "/workspace/storage-shared/models/Qwen3-4B"
+        assert config["models"]["teacher_path"] == (
+            "/workspace/storage-shared/models/Qwen3-14B"
+            if large_pair
+            else "/workspace/storage-shared/models/Qwen3-4B"
         )
+        assert config["rollout"]["batch_size"] == (16 if large_pair else 8)
+        assert config["training"]["micro_batch_size_per_gpu"] == (
+            4 if large_pair else 1
+        )
+        assert config["training"]["save_interval"] == (100 if large_pair else 50)
+        if large_pair:
+            assert (
+                config["models"]["student_path"]
+                == "/workspace/storage-shared/models/Qwen3-4B"
+            )
         assert config["rollout"]["num_responses"] == 4
         assert config["alfworld"]["max_turns"] == 30
         assert config["training"]["max_steps"] == 1000
