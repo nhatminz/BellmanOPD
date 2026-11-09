@@ -99,10 +99,31 @@ bash eval_gemma_selected_multiseed.sh --dry-run
 ```
 
 File summary nằm ngay trong mỗi method directory:
-`eval_summary_gemma_s42_43_44_steps200_1050_1500.json`, `.csv`, `.md`.
+`eval_summary_gemma_s42_43_44_steps200_1050_1500_ctx8192.json`, `.csv`, `.md`.
 Mỗi file gồm cả ba step, sáu dataset, avg@8/pass@8, giá trị từng seed và mean ± std.
 Chạy lại cùng command/tag sau gián đoạn để tiếp tục các seed chưa hoàn thành;
 đổi `EVAL_TAG=...` nếu muốn sinh lại hoàn toàn một lần mới.
+
+Nếu checkpoint đầu thực tế là step **300** như log eval mới, dùng:
+
+```bash
+EVAL_CHECKPOINTS="300 1050 1500" bash eval_gemma_selected_multiseed.sh
+```
+
+Launcher chỉ dùng GPU `0,1`, `--world-size 2`, `--max-model-len 8192`.
+Default tag tự phản ánh đúng các checkpoint đã chọn và context 8192. Với file
+launcher riêng như `eval_gemma.sh`, thêm `--max-model-len 8192` vào lệnh gọi
+`eval_multiseed_b200.sh`; biến `VLLM_MAX_MODEL_LEN` của training launcher không
+được script multiseed sử dụng.
+
+Run Gemma cũ có thể lưu `training_evaluation.vllm.max_model_len=9216` do kế thừa
+config Qwen. Evaluator nay kiểm tra `config.json` của checkpoint Gemma2 và giới
+hạn engine theo `max_position_embeddings` (8192 với Gemma-2). Cả dry-run, request
+lưu để resume, và vLLM workers đều dùng giới hạn đã resolve; không sửa config
+cũ, checkpoint hay history. Giữ `max_new_tokens` (ví dụ 7168), temperature, top-p,
+8 response/problem và stop tokens như protocol đã chọn. Context 8192 là tổng
+prompt + response; generation vẫn phải dừng khi đạt giới hạn context của engine.
+Không cần đặt `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`.
 
 File mới nằm trực tiếp trong thư mục method, cạnh history và checkpoint cũ:
 

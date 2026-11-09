@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_config, resolve_runtime_paths, save_config
+from .evaluation_context import resolve_evaluation_max_model_len
 
 BENCHMARKS = (
     "Competition-MATH",
@@ -321,6 +322,9 @@ def build_plan(
             if value is not None:
                 settings["vllm"][key] = value
         settings["vllm"]["tensor_parallel_size"] = 1
+        settings["vllm"]["max_model_len"] = resolve_evaluation_max_model_len(
+            checkpoint, settings["vllm"].get("max_model_len", 4096)
+        )
         plan.append(
             {
                 "step": step,

@@ -4,7 +4,10 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export STORAGE_ROOT="${STORAGE_ROOT:-/workspace/storage-shared}"
 export CUDA_VISIBLE_DEVICES=0,1
 RUN_OUTPUT_ROOT="${STORAGE_ROOT%/}/nlp/minhpn19/BellmanOPD_analysis/outputs"
-EVAL_TAG="${EVAL_TAG:-gemma_s42_43_44_steps200_1050_1500}"
+read -r -a CHECKPOINTS <<< "${EVAL_CHECKPOINTS:-200 1050 1500}"
+EVAL_MAX_MODEL_LEN="${EVAL_MAX_MODEL_LEN:-8192}"
+CHECKPOINT_TAG="$(IFS=_; printf '%s' "${CHECKPOINTS[*]}")"
+EVAL_TAG="${EVAL_TAG:-gemma_s42_43_44_steps${CHECKPOINT_TAG}_ctx${EVAL_MAX_MODEL_LEN}}"
 FAILED_RUNS=()
 
 for method_dir in \
@@ -14,9 +17,10 @@ for method_dir in \
   ta_gemma_micro4_seed42/ta_opd; do
   if bash "${REPO_DIR}/scripts/eval_multiseed_b200.sh" \
     --run-output "${RUN_OUTPUT_ROOT}/${method_dir}" \
-    --checkpoints 200 1050 1500 \
+    --checkpoints "${CHECKPOINTS[@]}" \
     --seeds 42 43 44 --fresh-seeds \
-    --world-size 2 --tag "${EVAL_TAG}" "$@"; then
+    --world-size 2 --max-model-len "${EVAL_MAX_MODEL_LEN}" \
+    --tag "${EVAL_TAG}" "$@"; then
     printf 'Completed: %s\n' "${method_dir}"
   else
     status=$?

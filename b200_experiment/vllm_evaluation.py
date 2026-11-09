@@ -23,6 +23,7 @@ from .models import generation_stop_token_ids
 
 from .config import load_config
 from .distributed import isolate_distributed_subprocess_environment
+from .evaluation_context import resolve_evaluation_max_model_len
 from .evaluation import (
     configured_benchmark_names,
     detailed_model_output_record,
@@ -315,7 +316,9 @@ def _evaluate_vllm_suite_impl(
         # the official composite config for vLLM 0.17 compatibility, so prune
         # the vision tower rather than allocating unused dummy/missing weights.
         engine_kwargs["language_model_only"] = True
-    max_model_len = vllm_settings.get("max_model_len", 4096)
+    max_model_len = resolve_evaluation_max_model_len(
+        model_path, vllm_settings.get("max_model_len", 4096)
+    )
     if max_model_len is not None:
         engine_kwargs["max_model_len"] = int(max_model_len)
     max_num_batched_tokens = vllm_settings.get("max_num_batched_tokens")
