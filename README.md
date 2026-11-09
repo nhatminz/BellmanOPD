@@ -295,6 +295,14 @@ và mean alignment/V/weight. `plot_training_progress.sh` hỗ trợ
 Một method tạo sáu đường benchmark (thêm GPQA-Diamond và AMC23); từ hai method trở lên tạo sáu subplot benchmark,
 mỗi subplot có một đường cho từng method. `PLOT_METHOD=both` vẫn tương thích và có nghĩa TA+RAC.
 
+## Eval MMLU-Pro
+
+Eval thêm MMLU-Pro trên ba seed 42/43/44, GPU 0,1: sửa danh sách checkpoint
+trong [`eval_mmlu_pro_multiseed.sh`](eval_mmlu_pro_multiseed.sh), rồi chạy
+`bash eval_mmlu_pro_multiseed.sh`. Có tqdm, avg@8/pass@8 từ cùng tám response,
+summary mean ± sample std và resume eval theo tag. Hướng dẫn:
+[`RUN_MMLU_PRO_B200.md`](RUN_MMLU_PRO_B200.md).
+
 ## Validation
 
 Các test nhẹ bao phủ Top-K OPD khớp upstream trên synthetic logits, `n=1`, global
