@@ -71,10 +71,38 @@ Nếu artifact cũ không ghi seed, script yêu cầu khai báo rõ seed eval c�
 # ... các đối số trên ... --baseline-seed 1234
 ```
 
-Script dừng trước generation nếu thiếu baseline của một trong sáu dataset, sampling
+Ở chế độ mặc định, script dừng trước generation nếu thiếu baseline của một trong sáu dataset, sampling
 protocol avg/pass cũ khác nhau, seed bị lặp, hoặc baseline không có 8 response/problem.
 Cần hoàn thiện/kiểm tra kết quả cũ trước khi tổng hợp ba seed; không tự bịa baseline
 hoặc trộn các protocol khác nhau.
+
+Muốn chạy lại toàn bộ seed 42/43/44, không ghép thêm kết quả cũ, dùng
+`--seeds 42 43 44 --fresh-seeds`. Sampling protocol lấy từ `training_evaluation`
+trong resolved config của run; mỗi checkpoint/seed sinh 8 response/problem để
+tính cả avg@8 và pass@8 trên đủ sáu dataset. Summary chỉ có đúng ba seed này,
+sample std ddof=1; lịch sử cũ được giữ nguyên.
+
+Bốn run Gemma được chọn, step 200/1050/1500, GPU 0/1:
+
+```bash
+cd /workspace/storage-shared/nlp/minhpn19/BellmanOPD_analysis
+bash eval_gemma_selected_multiseed.sh
+```
+
+Các run chạy lần lượt, mỗi run dùng cả hai GPU; lỗi một run sẽ chuyển sang run
+tiếp theo và báo danh sách lỗi cuối script. Cần có đủ `checkpoint-000200`,
+`checkpoint-001050`, `checkpoint-001500` trong từng method directory. Kiểm tra
+trước, không chạy GPU:
+
+```bash
+bash eval_gemma_selected_multiseed.sh --dry-run
+```
+
+File summary nằm ngay trong mỗi method directory:
+`eval_summary_gemma_s42_43_44_steps200_1050_1500.json`, `.csv`, `.md`.
+Mỗi file gồm cả ba step, sáu dataset, avg@8/pass@8, giá trị từng seed và mean ± std.
+Chạy lại cùng command/tag sau gián đoạn để tiếp tục các seed chưa hoàn thành;
+đổi `EVAL_TAG=...` nếu muốn sinh lại hoàn toàn một lần mới.
 
 File mới nằm trực tiếp trong thư mục method, cạnh history và checkpoint cũ:
 

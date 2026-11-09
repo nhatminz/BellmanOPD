@@ -242,6 +242,83 @@ class MultiseedEvaluationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "different request"):
                 execute(self.args(run), self.evaluator([]))
 
+    def test_fresh_three_seeds_without_old_histories_summarizes_all_checkpoints(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = self.make_run(Path(temporary))
+            for name in ("eval_history.jsonl", "eval_history_pass_at_8.jsonl"):
+                (run / name).unlink()
+            args = self.args(
+                run, checkpoints=["150", "300"], seeds=[42, 43, 44], fresh_seeds=True
+            )
+            calls = []
+            summary = execute(args, self.evaluator(calls))
+            self.assertEqual(
+                [(name, seed) for name, seed, _ in calls],
+                [
+                    (f"checkpoint-{step:06d}", seed)
+                    for step in [150, 300]
+                    for seed in [42, 43, 44]
+                ],
+            )
+            self.assertEqual(len(summary["results"]), 24)
+            for result in summary["results"]:
+                self.assertEqual(result["seeds"], [42, 43, 44])
+                self.assertEqual(result["n"], 3)
+                self.assertIsNone(result["baseline_history"])
+            avg, passed = summary["results"][:2]
+            self.assertAlmostEqual(avg["mean"], (0.5 + 0.375 + 0.5) / 3)
+            self.assertAlmostEqual(avg["std"], 0.125 / (3**0.5))
+            self.assertAlmostEqual(passed["std"], 0.25 / (3**0.5))
+            self.assertTrue((run / "eval_history_seed_42_extra_seeds.jsonl").is_file())
+            self.assertFalse((run / "eval_history.jsonl").exists())
+            execute(
+                args,
+                lambda *a, **k: self.fail("Completed requested seed must be reused"),
+            )
+
+    def test_fresh_seeds_ignore_conflicting_old_baselines_and_keep_them_unchanged(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = self.make_run(Path(temporary))
+            path = run / "eval_history_pass_at_8.jsonl"
+            path.write_text("old incomplete or malformed history\n")
+            before = {p.name: p.read_bytes() for p in run.glob("*.jsonl")}
+            args = self.args(run, seeds=[42, 43, 44], fresh_seeds=True)
+            execute(args, self.evaluator([]))
+            for name, data in before.items():
+                self.assertEqual((run / name).read_bytes(), data)
+
+    def test_fresh_seed_sample_std_requires_two_seeds_and_no_baseline_argument(self):
+        for overrides, error in [
+            ({"seeds": [42]}, "at least two"),
+            ({"baseline_seed": 42}, "cannot be combined"),
+        ]:
+            with (
+                self.subTest(overrides=overrides),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                run = self.make_run(Path(temporary))
+                with self.assertRaisesRegex(ValueError, error):
+                    execute(
+                        self.args(run, fresh_seeds=True, **overrides),
+                        lambda *a, **k: self.fail("Invalid request must not evaluate"),
+                    )
+
+    def test_fresh_seed_summary_rejects_changed_dataset_counts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = self.make_run(Path(temporary))
+            evaluate = self.evaluator([])
+
+            def changed_count(*args, **kwargs):
+                result = evaluate(*args, **kwargs)
+                if result["parameters"]["seed"] == 44:
+                    result["benchmarks"][BENCHMARKS[0]]["problems"] = 3
+                return result
+
+            with self.assertRaisesRegex(ValueError, "problem count changed"):
+                execute(
+                    self.args(run, seeds=[42, 43, 44], fresh_seeds=True), changed_count
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

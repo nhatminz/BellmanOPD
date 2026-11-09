@@ -182,6 +182,13 @@ def build_plan(
     if len(args.seeds) != len(set(args.seeds)) or not args.seeds or min(args.seeds) < 0:
         raise ValueError("--seeds must contain distinct non-negative integers")
     method = str(config["experiment"]["method"])
+    fresh_seeds = bool(getattr(args, "fresh_seeds", False))
+    if fresh_seeds and args.baseline_seed is not None:
+        raise ValueError("--fresh-seeds cannot be combined with --baseline-seed")
+    if fresh_seeds and len(args.seeds) < 2:
+        raise ValueError(
+            "--fresh-seeds requires at least two seeds for sample standard deviation"
+        )
     plan = []
     seen_steps: set[int] = set()
     defaults = config.get("training_evaluation", config.get("evaluation", {}))
@@ -204,7 +211,31 @@ def build_plan(
         seen_steps.add(step)
         baseline: dict[str, Any] = {}
         protocols = []
-        for metric, filename in LEGACY_FILES.items():
+        if fresh_seeds:
+            protocol = {
+                key: defaults.get(key)
+                for key in ("temperature", "top_p", "max_new_tokens")
+            }
+            if any(value is None for value in protocol.values()):
+                raise ValueError(
+                    f"Incomplete resolved evaluation sampling protocol: {protocol}"
+                )
+            if (
+                not math.isfinite(float(protocol["temperature"]))
+                or float(protocol["temperature"]) <= 0
+            ):
+                raise ValueError(
+                    "Fresh evaluation seeds require finite temperature > 0"
+                )
+            if (
+                not 0 < float(protocol["top_p"]) <= 1
+                or int(protocol["max_new_tokens"]) <= 0
+            ):
+                raise ValueError(
+                    "Evaluation requires top_p in (0, 1] and max_new_tokens > 0"
+                )
+            protocols = [protocol, protocol]
+        for metric, filename in ({} if fresh_seeds else LEGACY_FILES).items():
             row = _legacy_row(run, filename, step, method)
             # A modern history may contain both metrics from one generation.
             if row is None or any(
@@ -351,17 +382,18 @@ def summarize(
     for item in plan:
         for benchmark in BENCHMARKS:
             for metric, field in METRICS.items():
-                baseline = item["baseline"][metric]
-                values = [float(baseline["scores"][benchmark])]
+                baseline = item["baseline"].get(metric)
+                values = [float(baseline["scores"][benchmark])] if baseline else []
+                expected_count = baseline["problems"][benchmark] if baseline else None
                 for seed in seeds:
                     result = suites[(item["step"], seed)]["benchmarks"][benchmark]
-                    old_count = baseline["problems"][benchmark]
-                    if old_count is not None and int(old_count) != int(
+                    if expected_count is not None and int(expected_count) != int(
                         result["problems"]
                     ):
                         raise ValueError(
                             f"Dataset problem count changed for {benchmark} at step {item['step']}"
                         )
+                    expected_count = int(result["problems"])
                     values.append(float(result[field]))
                 mean, std = statistics.mean(values), statistics.stdev(values)
                 rows.append(
@@ -371,7 +403,9 @@ def summarize(
                         "method": item["method"],
                         "benchmark": benchmark,
                         "metric": metric,
-                        "seeds": [baseline["seed"], *seeds],
+                        "seeds": [baseline["seed"], *seeds]
+                        if baseline
+                        else list(seeds),
                         "values": values,
                         "n": len(values),
                         "mean": mean,
@@ -379,7 +413,7 @@ def summarize(
                         "mean_percent": 100 * mean,
                         "std_percentage_points": 100 * std,
                         "mean_pm_std": f"{100 * mean:.2f} ± {100 * std:.2f}",
-                        "baseline_history": baseline["history"],
+                        "baseline_history": baseline["history"] if baseline else None,
                     }
                 )
     return {
@@ -606,6 +640,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Selected checkpoint-N names, step numbers, or final",
     )
     parser.add_argument("--seeds", nargs="+", type=int, default=[43, 44])
+    parser.add_argument(
+        "--fresh-seeds",
+        action="store_true",
+        help="Evaluate and summarize only the requested seeds; do not read or require old baseline histories. Sampling protocol comes from the run's resolved evaluation config.",
+    )
     parser.add_argument(
         "--baseline-seed",
         type=int,
