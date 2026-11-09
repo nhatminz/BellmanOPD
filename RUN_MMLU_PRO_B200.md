@@ -161,6 +161,29 @@ MAX_NUM_SEQS=32 EVAL_BATCH_SIZE=16 GPU_MEMORY_UTILIZATION=0.80 \
 Giới hạn scheduling này không thay số mẫu 8/câu. Đổi `MAX_NEW_TOKENS` làm thay
 đổi giao thức; luôn dùng cùng budget cho các checkpoint cần so sánh.
 
+## Lỗi token-ID kiểu chuỗi trong vLLM
+
+Nếu bản cũ dừng ở `max_input_id > ...` với
+`TypeError: '>' not supported between instances of 'str' and 'int'`, nguyên
+nhân đã được tái hiện là evaluator truyền cả `BatchEncoding`/dictionary từ
+`apply_chat_template` vào `prompt_token_ids`, thay vì lấy `input_ids`.
+[API tokenizer](https://huggingface.co/docs/transformers/main/en/main_classes/tokenizer#transformers.PreTrainedTokenizerBase.apply_chat_template)
+có thể trả dictionary; mặc định return_dict khác nhau giữa các phiên bản.
+
+Bản sửa yêu cầu rõ `return_dict=True`, lấy `input_ids`, chuẩn hóa thành
+`list[int]` và kiểm tra trước khi đo context/load vLLM. Prompt, seed, số mẫu,
+budget và cách chấm không đổi. Không cần sửa checkpoint hoặc cài lại môi trường.
+
+Sau khi cập nhật `b200_experiment/mmlu_pro_evaluation.py`, chạy lại:
+
+```bash
+MMLU_PRO_GPUS=0,1,2,3 bash eval_mmlu_pro_multiseed.sh
+```
+
+Có thể dùng lại `EVAL_TAG` của lần lỗi để giữ các seed/shard đã hoàn tất;
+phải giữ đúng các tham số và GPU của lần đó. Code mới không thay request
+schema của các kết quả cũ.
+
 ## Kiểm thử local
 
 ```bash

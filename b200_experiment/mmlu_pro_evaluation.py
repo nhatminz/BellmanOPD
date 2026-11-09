@@ -20,7 +20,9 @@ import subprocess
 import sys
 import time
 import traceback
+from collections.abc import Mapping
 from datetime import datetime
+from numbers import Integral
 from pathlib import Path
 from typing import Any
 
@@ -200,6 +202,49 @@ def _read_predictions(path: Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in handle if line.strip()]
 
 
+def _prompt_token_ids(
+    tokenizer, row: dict[str, Any], *, enable_thinking: bool
+) -> list[int]:
+    # Transformers versions differ in apply_chat_template's return_dict default.
+    # Iterating a BatchEncoding yields strings such as "input_ids", which
+    # vLLM must never receive as token IDs. Request the form explicitly, then
+    # extract and validate before allocating the engine or measuring length.
+    encoded = tokenizer.apply_chat_template(
+        question_messages(row),
+        tokenize=True,
+        add_generation_prompt=True,
+        enable_thinking=enable_thinking,
+        return_dict=True,
+        return_tensors=None,
+        padding=False,
+        truncation=False,
+    )
+    ids = encoded.get("input_ids") if isinstance(encoded, Mapping) else encoded
+    if hasattr(ids, "tolist"):
+        ids = ids.tolist()
+    if (
+        isinstance(ids, (list, tuple))
+        and len(ids) == 1
+        and isinstance(ids[0], (list, tuple))
+    ):
+        ids = ids[0]  # tolerate a singleton batch, never flatten multiple prompts
+    if (
+        not isinstance(ids, (list, tuple))
+        or not ids
+        or any(
+            isinstance(value, bool) or not isinstance(value, Integral) or value < 0
+            for value in ids
+        )
+    ):
+        raise TypeError(
+            f"Question {row['question_id']}: tokenizer must return a non-empty "
+            "integer token-ID sequence, or a mapping with an input_ids field "
+            f"containing that sequence; got {type(encoded).__name__} "
+            f"with input_ids type {type(ids).__name__}."
+        )
+    return [int(value) for value in ids]
+
+
 def run_worker(request: dict[str, Any], rank: int) -> None:
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
@@ -235,11 +280,8 @@ def run_worker(request: dict[str, Any], rank: int) -> None:
         position=rank + 1,
         dynamic_ncols=True,
     ):
-        ids = tokenizer.apply_chat_template(
-            question_messages(row),
-            tokenize=True,
-            add_generation_prompt=True,
-            enable_thinking=settings["enable_thinking"],
+        ids = _prompt_token_ids(
+            tokenizer, row, enable_thinking=settings["enable_thinking"]
         )
         if len(ids) + settings["max_new_tokens"] > settings["max_model_len"]:
             raise ValueError(

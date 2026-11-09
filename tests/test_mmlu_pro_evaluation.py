@@ -148,6 +148,10 @@ class LLM:
         self.instances.append(self)
 
     def generate(self, prompts, params, use_tqdm):
+        for prompt in prompts:
+            ids = prompt["prompt_token_ids"]
+            assert isinstance(ids, list) and ids
+            assert all(type(token_id) is int for token_id in ids)
         self.calls.append((prompts, params))
         assert use_tqdm is False
         outputs = []
@@ -222,6 +226,143 @@ def test_two_shards_three_seeds_dual_metrics_and_cache(tmp_path, monkeypatch):
         rows = list(csv.DictReader(path.open()))
         assert rows[0]["category"] == "ALL"
         assert rows[0]["avg_at_8_percent"] == "12.50 ± 0.00"
+
+
+def test_batch_encoding_chat_template_on_four_gpus(tmp_path, monkeypatch):
+    from transformers import BatchEncoding
+
+    args = make_args(tmp_path)
+    args.gpus = "0,1,2,3"
+    install_runtime(monkeypatch)
+
+    class MappingTokenizer(Tokenizer):
+        def apply_chat_template(self, messages, **kwargs):
+            ids = super().apply_chat_template(messages, **kwargs)
+            return BatchEncoding({"input_ids": ids, "attention_mask": [1] * len(ids)})
+
+        def decode(self, ids, **kwargs):
+            # Match the user's failure: iterating BatchEncoding gives string
+            # field names instead of integer token IDs; only IDs may reach vLLM.
+            assert isinstance(ids, list)
+            assert all(type(token_id) is int for token_id in ids)
+            return super().decode(ids, **kwargs)
+
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained",
+        lambda *a, **kw: MappingTokenizer(),
+    )
+    result = evaluation.execute(args, local_runner)
+    assert not result["failures"]
+    assert len(LLM.instances) == 4
+    assert all(len(model.calls) == 3 for model in LLM.instances)
+    assert result["results"][0]["overall"]["questions"] == 5
+    assert result["results"][0]["overall"]["avg_at_8"]["mean"] == 0.125
+    assert result["results"][0]["overall"]["pass_at_8"]["mean"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "representation",
+    ["list", "tuple", "dict", "batch_encoding", "nested", "tensor", "numpy"],
+)
+def test_prompt_token_ids_are_plain_integers_for_supported_tokenizer_outputs(
+    representation,
+):
+    import numpy as np
+    import torch
+    from transformers import BatchEncoding
+
+    ids = [1, 7, 151645]
+    outputs = {
+        "list": ids,
+        "tuple": tuple(ids),
+        "dict": {"input_ids": ids, "attention_mask": [1, 1, 1]},
+        "batch_encoding": BatchEncoding({"input_ids": ids}),
+        "nested": {"input_ids": [ids]},
+        "tensor": {"input_ids": torch.tensor([ids])},
+        "numpy": {"input_ids": np.array(ids, dtype=np.int64)},
+    }
+
+    class EncodedTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            assert kwargs["return_dict"] is True
+            assert kwargs["return_tensors"] is None
+            assert kwargs["truncation"] is False
+            assert kwargs["padding"] is False
+            return outputs[representation]
+
+    row = {
+        "question_id": "70",
+        "question": "Q?",
+        "category": "math",
+        "options": ["one", "two"],
+    }
+    actual = evaluation._prompt_token_ids(
+        EncodedTokenizer(), row, enable_thinking=False
+    )
+    assert actual == ids
+    assert all(type(value) is int for value in actual)
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        "input_ids",
+        ["input_ids", "attention_mask"],
+        {"attention_mask": [1]},
+        {"input_ids": []},
+        {"input_ids": [1, "2"]},
+        {"input_ids": [True, 2]},
+        {"input_ids": [-1, 2]},
+        {"input_ids": [1.5, 2]},
+        {"input_ids": [[1], [2]]},
+    ],
+)
+def test_invalid_tokenizer_output_fails_before_loading_engine(
+    tmp_path, monkeypatch, encoded
+):
+    args = make_args(tmp_path)
+    install_runtime(monkeypatch)
+
+    class BrokenTokenizer(Tokenizer):
+        def apply_chat_template(self, messages, **kwargs):
+            return encoded
+
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained", lambda *a, **kw: BrokenTokenizer()
+    )
+    request = evaluation.checkpoint_request(
+        evaluation.build_plan(args), args.checkpoints[0]
+    )
+    with pytest.raises(TypeError, match="Question 70: tokenizer must return"):
+        evaluation.run_worker(request, 0)
+    assert not LLM.instances
+
+
+def test_context_length_checks_input_ids_in_mapping_instead_of_number_of_fields(
+    tmp_path, monkeypatch
+):
+    from transformers import BatchEncoding
+
+    args = make_args(tmp_path)
+    args.max_model_len, args.max_new_tokens = 40, 20
+    install_runtime(monkeypatch)
+
+    class MappingTokenizer(Tokenizer):
+        def apply_chat_template(self, messages, **kwargs):
+            return BatchEncoding(
+                {"input_ids": list(range(30)), "attention_mask": [1] * 30}
+            )
+
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained",
+        lambda *a, **kw: MappingTokenizer(),
+    )
+    request = evaluation.checkpoint_request(
+        evaluation.build_plan(args), args.checkpoints[0]
+    )
+    with pytest.raises(ValueError, match="30 prompt tokens"):
+        evaluation.run_worker(request, 0)
+    assert not LLM.instances
 
 
 def test_question_sampling_seed_independent_of_rank_and_batch_size():
