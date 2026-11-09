@@ -875,11 +875,26 @@ def validate_resume_config(
     if not source_path.is_file():
         return {"source_config": None, "checked": False, "mismatches": {}}
     source = yaml.safe_load(source_path.read_text(encoding="utf-8")) or {}
+    if source.get("alfworld", {}).get("enabled", False):
+        from .alfworld_protocol import resolve_protocol
+
+        # Preserve the saved fingerprint: it identifies the code/protocol that
+        # produced this checkpoint, even if prompt code changed since then.
+        saved_fingerprint = source["alfworld"].get("protocol_fingerprint")
+        source = resolve_protocol(source)
+        if saved_fingerprint:
+            source["alfworld"]["protocol_fingerprint"] = saved_fingerprint
+    if current.get("alfworld", {}).get("enabled", False):
+        from .alfworld_protocol import resolve_protocol
+
+        current = resolve_protocol(current)
     keys = (
         "experiment.method",
         "experiment.seed",
         "alfworld.enabled",
         "alfworld.protocol_version",
+        "alfworld.protocol_fingerprint",
+        "alfworld.action_prompt_mode",
         "alfworld.max_turns",
         "alfworld.max_turn_tokens",
         "alfworld.max_episode_tokens",

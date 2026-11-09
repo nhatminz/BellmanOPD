@@ -189,6 +189,14 @@ def production_tensorboard_metrics(
             if metrics.get(field) is not None
         }
     )
+    if metrics.get("alfworld"):
+        selected.update(
+            {
+                f"alfworld/logprob_debug/{key}": float(value)
+                for key, value in metrics.get("vllm_logprob_sanity", {}).items()
+                if isinstance(value, (int, float))
+            }
+        )
     selector = metrics.get("selector", {})
     selected.update(
         {
@@ -300,3 +308,20 @@ class TensorBoardLogger:
         if self.writer is not None:
             self.writer.flush()
             self.writer.close()
+
+    def write_alfworld_rollout(self, step: int, diagnostics: dict[str, Any]) -> None:
+        """Persist interaction diagnostics even if a guard stops before update."""
+        if self.writer is None:
+            return
+        for key, value in diagnostics.items():
+            if isinstance(value, (int, float)):
+                self.writer.add_scalar(
+                    f"alfworld/rollout/{key}", value, global_step=int(step)
+                )
+        for kind, values in diagnostics.get("task_types", {}).items():
+            for key, value in values.items():
+                if isinstance(value, (int, float)):
+                    self.writer.add_scalar(
+                        f"alfworld/task_type/{kind}/{key}", value, global_step=int(step)
+                    )
+        self.writer.flush()

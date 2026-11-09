@@ -2,6 +2,8 @@
 
 Train/eval ALFWorld multi-turn thật với CMT/OPD/TA/IW, teacher Qwen3-4B và student
 Qwen3-1.7B: [`ALFWORLD_MULTITURN.md`](ALFWORLD_MULTITURN.md).
+Protocol v2 sửa parser/action menu, giữ observation sau lỗi và chuẩn hóa PPO;
+phân tích nguyên nhân zero-success và validation: [`ALFWORLD_PROTOCOL_AUDIT.md`](ALFWORLD_PROTOCOL_AUDIT.md).
 Sửa CMT PPO partition, lỗi `GLIBCXX_3.4.32` và chạy cặp 14B → 4B:
 [`ALFWORLD_FIX_CMT_RUNTIME.md`](ALFWORLD_FIX_CMT_RUNTIME.md).
 

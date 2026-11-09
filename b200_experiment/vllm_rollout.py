@@ -135,8 +135,11 @@ class VLLMRolloutEngine:
                 "Cannot find the vllm executable in the active venv; install requirements.txt"
             )
         max_model_len = int(self.settings.get("max_model_len", 1024))
-        required_length = int(self.config["data"].get("max_prompt_tokens", 512)) + int(
-            self.config["rollout"].get("max_new_tokens", 256)
+        required_length = (
+            int(self.config["alfworld"]["max_episode_tokens"])
+            if self.config.get("alfworld", {}).get("enabled", False)
+            else int(self.config["data"].get("max_prompt_tokens", 512))
+            + int(self.config["rollout"].get("max_new_tokens", 256))
         )
         if max_model_len < required_length:
             raise ValueError(
@@ -175,6 +178,12 @@ class VLLMRolloutEngine:
             "--generation-config",
             "vllm",
         ]
+        if self.config.get("alfworld", {}).get("enabled", False) and self.settings.get(
+            "logprob_sanity", {}
+        ).get("enabled", False):
+            # Make the reported distribution explicit. These values include
+            # actual temperature/top-p, and must NOT be compared to raw HF LPs.
+            command.extend(("--logprobs-mode", "processed_logprobs"))
         if bool(self.settings.get("enable_prefix_caching", True)):
             command.append("--enable-prefix-caching")
         if bool(self.settings.get("enable_chunked_prefill", True)):
@@ -555,10 +564,16 @@ class VLLMRolloutEngine:
 
         tokenizer = load_student_tokenizer(self.config)
         stops = generation_stop_token_ids(tokenizer, self.config)
+        debug_logprobs = bool(
+            self.config["rollout"]
+            .get("vllm", {})
+            .get("logprob_sanity", {})
+            .get("enabled", False)
+        )
 
         def generate(prompt_ids, seed, budget):
             try:
-                _, tokens, _ = self._generate_one(
+                _, tokens, log_probs = self._generate_one(
                     0,
                     prompt_ids,
                     max_new_tokens=budget,
@@ -566,10 +581,16 @@ class VLLMRolloutEngine:
                     top_p=float(self.config["rollout"]["top_p"]),
                     eos_token_ids=stops,
                     seed=int(seed),
-                    return_log_probs=False,
+                    return_log_probs=debug_logprobs,
                 )
             except requests.exceptions.Timeout as error:
                 raise TimeoutError("Student multi-turn generation timed out") from error
+            if debug_logprobs:
+                return {
+                    "token_ids": tokens,
+                    "log_probs": log_probs,
+                    "logprob_kind": "sampling_temperature_top_p",
+                }
             return tokens
 
         try:

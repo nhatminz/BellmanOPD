@@ -82,6 +82,9 @@ def resolve_runtime_paths(config: dict[str, Any]) -> dict[str, Any]:
             name: resolved(path) for name, path in alfworld["eval_paths"].items()
         }
         alfworld["game_cache_dir"] = resolved(alfworld["game_cache_dir"])
+        from .alfworld_protocol import resolve_protocol
+
+        result = resolve_protocol(result)
     result.setdefault("paths", {})["storage_root"] = str(root.resolve())
     return result
 

@@ -43,6 +43,7 @@ class RolloutBatch:
     actor_positions: torch.Tensor | None = None
     actor_token_mask: torch.Tensor | None = None
     episode_traces: list[dict] | None = None
+    rollout_logprob_kind: str | None = None
 
 
 def rollout_forward_inputs(

@@ -1,18 +1,46 @@
-# ALFWorld multi-turn OPD trên B200
+# ALFWorld multi-turn protocol v2 trên B200
 
-Nếu CMT lỗi `Global PPO minibatch has no real trajectory` hoặc simulator lỗi
-`GLIBCXX_3.4.32`, xem [ALFWORLD_FIX_CMT_RUNTIME.md](ALFWORLD_FIX_CMT_RUNTIME.md)
-cho bản sửa và lệnh chạy cặp Qwen3-14B → Qwen3-4B trên 2 GPU.
+Protocol v2 sửa giao thức gây `look;`/parser failure và lỗi chuẩn hóa PPO Top-K.
+Đọc phân tích, phản ví dụ và phạm vi sửa ở [ALFWORLD_PROTOCOL_AUDIT.md](ALFWORLD_PROTOCOL_AUDIT.md).
+Code không cam kết checkpoint sau train sẽ có success rate cao: protocol đúng và
+năng lực giải task của student/teacher là hai điều phải kiểm tra riêng.
 
-Pipeline này dùng **simulator TextWorld PDDL thật** để reset/step từng game ALFWorld.
-Student sinh mọi lượt; teacher được freeze và chỉ chấm các prefix student đã đi qua.
-Train/eval dùng chung giao thức action và lịch sử đầy đủ. Eval chạy riêng trên ID/OOD.
-Các launcher/config thí nghiệm toán hiện có giữ nguyên.
+## 1. Các thay đổi hành vi
 
-## 1. Chuẩn bị môi trường và dữ liệu
+- System prompt liệt kê từng ví dụ trên một dòng, không còn ví dụ `look;`.
+- Parser nhận đúng một command, cho phép một dấu `;` hoặc `.` cuối lệnh. Không
+  lấy lệnh đầu từ response nhiều lệnh. JSON `{"action":"look;"}` và XML
+  `<action>look;</action>` được hỗ trợ. `slice ... with ...` và `put ... into ...`
+  được kiểm tra theo grammar thật. Không tự chiếu tới action gần nhất.
+- `alfworld.action_prompt_mode=admissible` là mặc định: mỗi lượt có goal quan sát
+  được ở reset, observation thật và các command hiện hợp lệ, đúng tên/ID object.
+  Đây là danh sách action hợp lệ, không phải expert plan. `legacy` giữ kiểu không
+  có action menu để ablation. Protocol v1 cũ vẫn được nhận diện riêng.
+- Parser failure không gọi simulator và không thay observation thật. Feedback
+  parser có nhãn riêng, goal vẫn trong history. Raw response/token IDs được giữ.
+- Không truncate goal/history/action list. Dừng episode khi không đủ context cho
+  observation đầy đủ. Observation ban đầu vượt budget báo lỗi có hướng xử lý.
+- Các token invalid vẫn thuộc objective on-policy; không tự lọc episode thất bại.
+  `invalid_trajectory_filter=none` được kiểm tra rõ. Thử nghiệm filtering cần một
+  estimator ablation riêng, không được bật ngầm.
+- Collapse guard mặc định `error`: all-parser-invalid batch, hoặc batch >=32 lượt
+  với parser failure >=0.95, look rate >=0.98, hoặc repeat rate >=0.98, sẽ dừng
+  trước optimizer update, sau khi ghi trace. `warn` cho phép tiếp tục có cảnh báo;
+  `off` chỉ dùng khi chủ động nghiên cứu estimator trên dữ liệu lỗi.
+- Zero-actor episode làm mọi rank dừng đồng bộ trước scoring/backward; không tạo
+  token/loss giả. Không âm thầm update batch không có target.
+- ALFWorld v2 dùng **cùng full-vocabulary normalizer cho old/current PPO log-prob**
+  trên đúng Student-Top-K IDs. Bản cũ có ratio khác 1 ngay khi policy chưa đổi.
+  Không đổi Student-p reward, Top-K support, clipping, CMT allocation, TA budget
+  hoặc IW sampled-action objective. Single-turn math/Gemma cũ giữ nguyên đường code.
+- Student sinh tất cả các lượt. Teacher freeze, chỉ chấm đúng prefix student đã
+  đi qua. Environment/chat tokens là context, không phải actor loss targets.
+  CMT/IW dùng trục actor compact xuyên lượt, reset giữa episode; không tính
+  discount/policy transition cho token môi trường.
 
-Chạy trong môi trường B200 hiện đã cài dependencies của repository, bao gồm vLLM
-với CUDA IPC weight transfer đang dùng cho các thí nghiệm cũ. Cài thêm simulator:
+## 2. Dữ liệu, dependencies, simulator
+
+Dùng venv B200 hiện tại đã có dependencies của repo/vLLM CUDA IPC:
 
 ```bash
 export STORAGE_ROOT=/workspace/storage-shared
@@ -22,13 +50,7 @@ export PATH="$(dirname "$PYTHON_BIN"):$PATH"
 "$PYTHON_BIN" -m pip install -r requirements-alfworld.txt
 ```
 
-TextWorld 1.7.0 đã được kiểm tra với dữ liệu này. `textworld[pddl]` cài backend PDDL
-và Fast Downward; source build cần C/C++ compiler, `make`, CMake và executable
-`python` từ venv trên `PATH`. Không cần ALFWorld THOR/Unity hay tải toàn bộ assets
-ALFWorld vì parquet đã nhúng domain/problem/grammar của từng game. Thiếu simulator
-hoặc file game sẽ báo lỗi setup; không có fallback sang phản hồi tĩnh.
-
-Đặt ba file tại:
+Ba file raw parquet phải tồn tại:
 
 ```text
 $STORAGE_ROOT/nlp/minhpn19/data/ALFworld/train-00000-of-00001.parquet
@@ -36,13 +58,16 @@ $STORAGE_ROOT/nlp/minhpn19/data/ALFworld/eval_in_distribution-00000-of-00001.par
 $STORAGE_ROOT/nlp/minhpn19/data/ALFworld/eval_out_of_distribution-00000-of-00001.parquet
 ```
 
-Nếu chưa tải, lệnh này lấy trực tiếp các file từ dataset bạn cung cấp, bỏ qua file
-đã tồn tại:
+Đã đọc schema thực `id/task_type/game_file_path/game_content`; `game_content`
+nhúng domain/problem/grammar. Bản kiểm tra có 3553 train, 140 ID, 134 OOD.
+Loader kiểm tra disjoint theo ID/path/game hash và loại walkthrough/solution khỏi
+runtime game/task. Không cần THOR/Unity hay replay observation từ parquet.
+
+Nếu chưa tải:
 
 ```bash
-"$PYTHON_BIN" - <<'PY'
-import os
-import urllib.request
+"$PYTHON_BIN" - <<'PYDATA'
+import os, urllib.request
 from pathlib import Path
 root = Path(os.environ["STORAGE_ROOT"]) / "nlp/minhpn19/data/ALFworld"
 root.mkdir(parents=True, exist_ok=True)
@@ -52,87 +77,84 @@ for split in ("train", "eval_in_distribution", "eval_out_of_distribution"):
     if not path.exists():
         temporary = path.with_suffix(".download")
         urllib.request.urlretrieve(
-            f"https://huggingface.co/datasets/awawa-agi/alfworld-raw/resolve/main/data/{name}",
-            temporary,
-        )
+            f"https://huggingface.co/datasets/awawa-agi/alfworld-raw/resolve/main/data/{name}", temporary)
         temporary.replace(path)
     print(path)
-PY
+PYDATA
 ```
 
-Schema thực tế đã đọc: `id`, `task_type`, `game_file_path`, `game_content` đều là
-string. `game_content` là JSON chứa `pddl_domain`, `pddl_problem`, `grammar`,
-`solvable`, `walkthrough`. Bản tải kiểm tra có **3553 train, 140 ID, 134 OOD**;
-cả ba split disjoint theo ID, đường dẫn game và hash nội dung game. Loader còn hỗ
-trợ metadata mapping và đường dẫn game thật tương đối với parquet.
-
-Loader bỏ `walkthrough`/solution khỏi task runtime và khỏi game cache của policy.
-Không đưa danh sách action đúng hay planner vào policy. Entity names dùng cách
-đánh số xác định tương thích `AlfredDemangler` của ALFWorld. Grammar của raw export
-dùng `move cup 1 to table 1` để đặt đồ; không nên chỉ prompt `put ... in/on ...`.
-
-Kiểm tra dữ liệu và real reset/step, không tải model lên GPU:
+Kiểm tra reset/step và toàn bộ parser → environment → collector → actor mask:
 
 ```bash
-"$PYTHON_BIN" -m b200_experiment.alfworld_cli ready
-"$PYTHON_BIN" -m b200_experiment.alfworld_cli smoke
+python3 -m b200_experiment.alfworld_cli ready
+python3 -m b200_experiment.alfworld_cli smoke
 ```
 
-`ready` kiểm tra tất cả split và gọi reset/`look` qua simulator subprocess.
-`smoke` chạy thêm walkthrough của đúng một game **chỉ để xác minh simulator**,
-kiểm tra simulator trả `success=true`; đây không phải kết quả đánh giá policy.
-Mặc định là game ID đầu tiên, đã kiểm tra hoàn thành sau 4 action.
-Có thể chọn `--split eval_out_of_distribution --task-index 0`.
-`--output readiness.json` ghi một report mới và từ chối ghi đè.
+`smoke` dùng **scripted walkthrough chỉ trong diagnostic**, cố ý thêm `;`, rồi
+chạy simulator thật qua collector. Report `parser_environment_smoke` phải success,
+parser failure=0 và có punctuation recovery. Đây không phải policy/model score.
+Có thể chọn `--split eval_out_of_distribution --task-index 0`, hoặc
+`--output results/alfworld_v2_smoke.json` (file mới, không ghi đè).
 
-## 2. Teacher Qwen3-4B và student Qwen3-1.7B
+Nếu gặp `GLIBCXX_3.4.32`, build native runtime trên chính node đang dùng:
 
-Launcher giữ convention đường dẫn đang có trong repo, relative với `STORAGE_ROOT`:
+```bash
+bash scripts/rebuild_alfworld_native.sh
+python3 -m b200_experiment.alfworld_cli smoke
+```
+
+Build cần gcc/g++/make/cmake; nó cài native package riêng theo host/Python, không
+thay torch/vLLM hay venv chung. Chi tiết: [ALFWORLD_FIX_CMT_RUNTIME.md](ALFWORLD_FIX_CMT_RUNTIME.md).
+
+## 3. Chọn model và kiểm tra trước train
+
+Ví dụ Qwen3-4B teacher → Qwen3-1.7B instruction student, theo đường dẫn local B200:
 
 ```bash
 export TEACHER_MODEL=models/Qwen3-4B
-export STUDENT_MODEL=nlp/tungdd11/stable-on-policy-distillation/OPD/model/Qwen3-1.7B-Base
-```
+export STUDENT_MODEL=models/Qwen3-1.7B
 
-Nếu chưa có teacher ở vị trí này, tải trước khi kiểm tra model:
-
-```bash
-hf download Qwen/Qwen3-4B --local-dir "$STORAGE_ROOT/$TEACHER_MODEL"
-```
-
-Student mặc định dùng asset Base cũ. Khi chuẩn bị asset Base mới, nguồn tương ứng
-là `Qwen/Qwen3-1.7B-Base`; bản `Qwen/Qwen3-1.7B` cũng dùng được bằng cách đặt
-`STUDENT_MODEL` tới đúng thư mục chứa bản đó.
-
-`STUDENT_MODEL` mặc định trỏ vào student asset cũ, kể cả tên thư mục có hậu tố
-`Base`. Nếu bạn dùng Qwen/Qwen3-1.7B ở vị trí khác, thay biến đó bằng đúng đường
-dẫn local của bạn; không đổi teacher/student giữa bốn phương pháp. Cần model/tokenizer
-đầy đủ, chat template của student, và token-to-ID mapping giống hệt teacher.
-Kiểm tra trước khi train:
-
-```bash
-"$PYTHON_BIN" -m b200_experiment.alfworld_cli ready --check-models \
+python3 -m b200_experiment.alfworld_cli ready --check-models \
   --set "models.teacher_path=$TEACHER_MODEL" \
   --set "models.student_path=$STUDENT_MODEL"
 ```
 
-Student tokenizer là tokenizer duy nhất khi render/sampling/scoring; không
-decode rồi re-tokenize input cho teacher. `enable_thinking=false` dùng cho cả
-lịch sử chia sẻ. Kiểm tra tương thích tokenizer hiện có của repo vẫn chạy khi
-load model. Chỉ thay model path không thể bỏ qua kiểm tra này.
+Nếu dùng asset Base cũ, đặt `STUDENT_MODEL` tới đúng thư mục đó. Token-ID mapping
+teacher/student vẫn phải tương thích tuyệt đối. Student tokenizer là tokenizer
+chung; `enable_thinking=false`; native end-of-turn/EOS được dừng đúng. Gemma2 không
+có system role nên instruction được đặt vào user turn đầu bằng template của nó.
+Launcher không thay initialization giữa OPD/TA/CMT/IW.
 
-ALFWorld thêm native assistant end-of-turn vào stop IDs khi tokenizer có token
-đó. Điều này cần cho Qwen3 Base: EOS là `<|endoftext|>`, còn chat template đóng
-lượt bằng `<|im_end|>`. Thay đổi stop này chỉ bật cho ALFWorld; explicit
-`models.stop_token_ids` vẫn có quyền ưu tiên.
-
-## 3. Train bốn phương pháp với cùng cấu hình
-
-Các biến sau dùng chung cho mọi phương pháp:
+Nên so sánh untouched student và teacher trên **cùng 8 train tasks** trước:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+PROBE_ID="$(date +%Y%m%d_%H%M%S)"
+for ROLE in student teacher; do
+  python3 -m b200_experiment.alfworld_cli probe \
+    --role "$ROLE" --split train --limit 8 --seed 42 --gpus 0,1 \
+    --output "results/alfworld_v2_probe_${ROLE}_${PROBE_ID}" \
+    --set "models.teacher_path=$TEACHER_MODEL" \
+    --set "models.student_path=$STUDENT_MODEL"
+done
+```
+
+Mỗi probe dùng một vLLM replica/GPU, tương tác môi trường mới, cùng student
+shared tokenizer cho cả hai role. Xem `summary.json`, `episodes.jsonl`, `rank-*.log`:
+SR, parser/simulator-invalid, tỷ lệ look, số action khác nhau, top response/action.
+Nếu Base không theo được action protocol hoặc teacher cũng chỉ `look`, chưa có
+bằng chứng OPD sẽ học được giải task. Có thể cần instruction initialization hoặc
+supervised warm-start được thiết kế riêng; code không tự thêm expert data.
+
+## 4. Train trên 2 hoặc 4 GPU
+
+Chọn **một** topology, giữ mọi biến workload giống nhau giữa bốn phương pháp:
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1          # 2 GPU
+# Hoặc: export CUDA_VISIBLE_DEVICES=0,1,2,3   # 4 GPU
+
 export GLOBAL_BATCH_SIZE=8
+export BATCH_SIZE=8
 export NUM_RESPONSES=4
 export PPO_MINI_BATCH_SIZE=8
 export MICRO_BATCH_SIZE_PER_GPU=1
@@ -148,208 +170,196 @@ export SEED=42
 export ROLLOUT_SEED=42
 ```
 
-Chạy lần lượt, hoặc chọn phương pháp bạn muốn chạy trước:
+Đây là 8 task × 4 episode =32 episode/rollout, PPO=8 episode/update, tối đa
+4 updates/rollout. Chia trên 2 hay 4 GPU không đổi global budget. Microbatch chỉ
+thay bộ nhớ/accumulation. `MAX_STEPS` là tổng optimizer step, không phải số rollout.
+B200 vLLM sync weights một lần trước batch episode, không có collective giữa lượt.
+
+Chạy **smoke training ngắn** OPD và CMT, có log-prob sanity check xuyên lượt:
 
 ```bash
-RUN_NAME=alfworld_qwen3_cmt_s42 bash scripts/train_alfworld_multiturn.sh cmt
-RUN_NAME=alfworld_qwen3_opd_s42 bash scripts/train_alfworld_multiturn.sh opd
-RUN_NAME=alfworld_qwen3_ta_s42  bash scripts/train_alfworld_multiturn.sh ta
-RUN_NAME=alfworld_qwen3_iw_s42  bash scripts/train_alfworld_multiturn.sh iw
+for METHOD in opd cmt; do
+  RUN_NAME="alfworld_v2_${METHOD}_smoke_$(date +%Y%m%d_%H%M%S_%N)" \
+  MAX_STEPS=2 SAVE_INTERVAL=1 \
+  VLLM_LOGPROB_SANITY_ENABLED=true VLLM_LOGPROB_SANITY_FAIL=true \
+  bash scripts/train_alfworld_multiturn.sh "$METHOD"
+done
 ```
 
-`GLOBAL_BATCH_SIZE` là số task toàn cục, `NUM_RESPONSES` là số episode độc lập mỗi
-task. Ví dụ trên tạo 32 episode/rollout và tối đa 4 optimizer updates/rollout;
-`PPO_MINI_BATCH_SIZE=8` là số episode toàn cục/update, không phải mỗi GPU.
-`MAX_STEPS` là tổng optimizer steps. Nếu muốn consume epoch thay vì giới hạn step,
-dùng `MAX_STEPS=-1 NUM_EPOCHS=...` như các launcher cũ.
-Global PPO mini-batch phải >= số GPU. `TRAIN_NPROC_PER_NODE` có thể giới hạn worker
-trong mask GPU; mặc định dùng toàn bộ GPU trong `CUDA_VISIBLE_DEVICES`.
+Debug mode yêu cầu vLLM `processed_logprobs` và so với HF với đúng temperature/top-p,
+bao gồm lượt sau. Mean/max discrepancy và raw-policy/sampling LP means được ghi
+trong `vllm_logprob_sanity` và TensorBoard `alfworld/logprob_debug/*`.
+Mặc định tolerance=0.05, tối đa 32 token/rank (lấy token đầu mỗi lượt). Muốn sửa:
+`--set rollout.vllm.logprob_sanity.max_tokens_per_turn=2` hoặc `.tolerance=...`.
+Debug tắt mặc định ở train dài, không giữ full-vocabulary logits diagnostic.
 
-Config nằm ở `configs/alfworld_multiturn.yaml`; có thể duplicate launcher để sửa
-biến trực tiếp hoặc truyền `--set key=value` cuối lệnh. Ví dụ kiểm tra tích hợp
-ngắn trên B200 trước khi train dài:
+Kiểm tra finite loss, gradient khác 0, PPO ratio ban đầu gần 1, trace có action
+đa dạng và chuyển trạng thái thật. Loss giảm không chứng minh success tăng.
+Guard mặc định sẽ dừng protocol collapse trước update; không tắt guard chỉ để
+che lỗi. Nếu chủ động làm ablation, `COLLAPSE_GUARD_MODE=warn` vẫn giữ tất cả token.
+
+Train fresh bốn method, lần lượt, mỗi run dùng mọi GPU trong mask đã chọn:
 
 ```bash
-RUN_NAME=alfworld_cmt_check MAX_STEPS=2 SAVE_INTERVAL=1 \
-  bash scripts/train_alfworld_multiturn.sh cmt
+RUN_NAME=alfworld_v2_opd_s42 bash scripts/train_alfworld_multiturn.sh opd
+RUN_NAME=alfworld_v2_ta_s42  bash scripts/train_alfworld_multiturn.sh ta
+RUN_NAME=alfworld_v2_cmt_s42 bash scripts/train_alfworld_multiturn.sh cmt
+RUN_NAME=alfworld_v2_iw_s42  bash scripts/train_alfworld_multiturn.sh iw
 ```
 
-Một episode dừng khi simulator terminal, agent chỉ sinh EOS, đạt giới hạn lượt,
-tổng actor token, hoặc context. `MAX_TURN_TOKENS` là giới hạn mỗi response;
-`MAX_RESPONSE_LEN` là tổng actor token trong episode; `MAX_EPISODE_TOKENS` tính cả
-task/observations/chat envelopes/actions. Lịch sử không bị truncate. Khi tăng
-context phải tăng cả `rollout.vllm.max_model_len` (launcher tự đặt theo biến context).
-Action sai vẫn được simulator xử lý; response nhiều dòng/nhiều lệnh hoặc sai format
-nhận protocol error, không có bước game giả. Timeout được ghi rõ trong trace.
-Episode không có actor token không được biến thành loss giả; training báo lỗi.
+Nếu muốn dừng chuỗi khi một run lỗi, nối bằng `&&` hoặc dùng shell `set -e`.
+Output của launcher này là `outputs/<RUN_NAME>/<method>_opd/`, kể cả `opd_opd`
+và `iw_opd`. Có thể đặt rõ `OUTPUT_DIR=...`.
 
-## 4. Resume
-
-Output mặc định: `outputs/<RUN_NAME>/<method>_opd/`. Ví dụ resume CMT ở step 50:
+Cặp 14B → 4B cũng dùng protocol v2:
 
 ```bash
-RESUME_FROM_CHECKPOINT="$PWD/outputs/alfworld_qwen3_cmt_s42/cmt_opd/checkpoint-000050" \
-MAX_STEPS=1000 bash scripts/train_alfworld_multiturn.sh cmt
+CUDA_VISIBLE_DEVICES=0,1 \
+TEACHER_MODEL=models/Qwen3-14B STUDENT_MODEL=models/Qwen3-4B \
+RUN_NAME=alfworld_v2_cmt_14b_s42 \
+bash scripts/train_alfworld_multiturn_14b.sh cmt
 ```
 
-Hoặc chọn checkpoint hoàn chỉnh mới nhất:
+Nếu shell chưa export workload ở trên, launcher 14B giữ defaults riêng: global
+batch=16, PPO=8, micro=4/GPU, save=100. Dùng cùng workload đó cho cả bốn method;
+đổi đối số thành opd/ta/iw để train các baseline tương ứng.
+
+Resume **chỉ cùng protocol/fingerprint**:
 
 ```bash
-OUTPUT_DIR="$PWD/outputs/alfworld_qwen3_cmt_s42/cmt_opd" \
-RESUME_FROM_CHECKPOINT=auto MAX_STEPS=1000 \
-  bash scripts/train_alfworld_multiturn.sh cmt
+OUTPUT_DIR="$PWD/outputs/alfworld_v2_cmt_s42/cmt_opd" \
+RESUME=auto MAX_STEPS=1000 bash scripts/train_alfworld_multiturn.sh cmt
 ```
 
-Giữ các biến model/batch/sampling/seed/context/LR như lần đầu. Resume phục hồi
-model, optimizer, RNG và vị trí PPO mini-batch bằng cơ chế hiện có; checkpoint cần
-`optimizer.pt`. `MAX_STEPS` là mốc tổng cần đạt, không phải số step chạy thêm.
-ALFWorld protocol/max turns/token budgets cũng được kiểm tra khi resume.
-Episode traces cũ được giữ; các rollout tái sinh có tên UUID mới và ghi rõ
-`rollout_index`/`first_optimizer_step`, nên không ghi đè hay coi trace cũ là dữ liệu train.
+Giữ model/data/seed/sampling/batch/LR/token limits như run gốc. Checkpoint cần
+optimizer.pt. Không resume optimizer/checkpoint protocol v1 vào v2. Tên run cũ,
+metrics, checkpoint và summary cũ không bị ghi đè.
 
-## 5. Eval độc lập checkpoint bất kỳ trên seed 42/43/44
+## 5. Eval 3 seed, ID/OOD và summary ±
 
-Không chạy eval trong training, không cần `eval_history.jsonl` cũ hoặc baseline.
-Chọn method folder có `resolved_config.yaml`, và một hoặc nhiều checkpoint:
+Ví dụ eval CMT mới trên 2 GPU:
 
 ```bash
 bash scripts/eval_alfworld_multiseed.sh \
   --method cmt \
-  --run-output "$PWD/outputs/alfworld_qwen3_cmt_s42/cmt_opd" \
+  --run-output "$PWD/outputs/alfworld_v2_cmt_s42/cmt_opd" \
   --checkpoints 50 150 final \
-  --seeds 42 43 44 \
-  --gpus 0,1,2,3 \
-  --tag id_ood_s42_43_44_v1
+  --seeds 42 43 44 --gpus 0,1 --tag id_ood_v2_s42_43_44
 ```
 
-Chỉ chọn các checkpoint thực sự tồn tại. `50` được đổi thành `checkpoint-000050`;
-cũng có thể truyền `checkpoint-000150`, `final`, hoặc absolute checkpoint path
-trực tiếp nằm trong method run đã chọn:
+4 GPU: thay `--gpus 0,1` bằng `--gpus 0,1,2,3`. Chỉ chọn checkpoint tồn tại.
+Số step được đổi thành `checkpoint-000050`...; `final` phải có metadata step.
+
+Eval cả bốn run đã train ở mục 4, lần lượt:
+
+```bash
+for METHOD in opd ta cmt iw; do
+  bash scripts/eval_alfworld_multiseed.sh \
+    --method "$METHOD" \
+    --run-output "$PWD/outputs/alfworld_v2_${METHOD}_s42/${METHOD}_opd" \
+    --checkpoints 50 150 final \
+    --seeds 42 43 44 --gpus 0,1 --tag id_ood_v2_s42_43_44
+done
+```
+
+Mỗi checkpoint/seed chạy mới toàn bộ 140 ID +134 OOD, 1 episode/task/seed,
+không replay và không dùng math avg@8/pass@8. Sampling eval mặc định bằng rollout
+v2: temperature=1, top_p=1. Seed theo task ID, không theo GPU partition.
+`--dry-run` kiểm tra plan mà không chạy model.
+
+Kết quả ở `<run-output>/alfworld_eval/<tag>/`:
+
+```text
+plan.json                          # protocol version/fingerprint + exact config
+resolved_config.yaml
+summary.json                       # từng checkpoint, ID/OOD, từng task category
+summary.csv                        # scalar metric mean/std/n/display
+per_seed.csv
+task_results.jsonl                 # từng task ID qua các seed
+step-000050/seed-42/episodes.jsonl  # raw response, exact IDs, parsed action, observations
+step-000050/seed-42/summary.json
+step-000050/seed-42/rank-00000.log
+complete.json                      # chỉ có khi toàn bộ evaluation hoàn thành
+```
+
+Summary có SR, average turns, parser failure, simulator-invalid, total-invalid,
+punctuation recovery, valid action, action diversity/count, look/first-look/repeat,
+unchanged observation, actor token count và termination reasons. Top 20 raw
+responses và normalized actions được lưu cho mỗi split/task category/seed và
+aggregate. Invalid-rate denominator là tất cả agent lượt; unchanged observation
+rate dùng số simulator steps; punctuation recovery rate dùng tất cả lượt. SR
+vẫn đến từ state.won. Giảm parser failure không được gọi là tăng task success.
+
+`±` là **sample standard deviation (ddof=1) giữa seed 42/43/44 của cùng checkpoint**,
+không phải confidence interval hay biến động training seed. Top-K overlap/mass và
+gradient norm có trong training JSONL/TensorBoard; standalone eval không load
+teacher/backward nên ghi chúng là training-only/không có giá trị, không bịa số.
+
+Tag đã tồn tại bị từ chối. Dùng tag mới cho lần chạy khác hoặc lần trước bị ngắt.
+Không gộp old-protocol summaries vào new-protocol summaries.
+
+## 6. Chẩn đoán checkpoint cũ bằng protocol mới
+
+Eval mặc định dùng protocol của training run, không tự đổi v1 sang v2. Có thể
+chủ động so checkpoint v1 dưới giao thức mới trong output namespace mới:
 
 ```bash
 bash scripts/eval_alfworld_multiseed.sh \
-  --method ta \
-  --run-output "$PWD/outputs/alfworld_qwen3_ta_s42/ta_opd" \
-  --checkpoints "$PWD/outputs/alfworld_qwen3_ta_s42/ta_opd/checkpoint-000050" \
-  --seeds 42 43 44 --gpus 0,1,2,3 --tag selected_s42_43_44_v1
+  --run-output "$PWD/outputs/OLD_RUN/cmt_opd" --method cmt \
+  --checkpoints final --seeds 42 43 44 --gpus 0,1 \
+  --set alfworld.protocol_version=2 \
+  --set alfworld.action_prompt_mode=admissible \
+  --allow-protocol-change --tag legacy_weights_new_protocol_v2
 ```
 
-`--dry-run` kiểm tra selection và tất cả task/split, in kế hoạch rồi thoát trước
-khi tạo output/model. Mỗi seed chạy **fresh reset/step** trên toàn bộ 274 task,
-mỗi task đúng một episode; seed generation phụ thuộc seed đánh giá + task ID,
-không phụ thuộc GPU partition. Không dùng replay cache, không dùng avg@8/pass@8.
-Mỗi GPU là một vLLM TP=1 replica, nhận task shard riêng; mỗi replica gọi offline
-`LLM.generate` tuần tự để tránh truy cập engine từ nhiều thread.
+Plan/summary ghi rõ training fingerprint, evaluation fingerprint và
+`evaluation_protocol_changed=true`. Đây là **checkpoint cũ dưới eval protocol
+mới**, không phải kết quả của model được train bằng v2. Không đổi optimizer hay
+checkpoint cũ và không dùng cờ này để vượt kiểm tra resume.
 
-Eval giữ giới hạn lượt/context/actor tokens của run; mặc định sampling
-temperature=1, top_p=1. Có thể cấu hình rõ `--set evaluation.temperature=0.7`;
-hãy giữ cùng protocol cho mọi phương pháp. SR/invalid rate lưu dạng [0,1];
-mean ± std dùng **sample std giữa các seed (ddof=1)**. Average turns tính trên
-mọi episode, gồm cả episode không thành công; invalid rate = tổng response invalid
-/ tổng lượt. Task type và từng task ID có thống kê riêng.
+## 7. Train diagnostics và tests
 
-Eval xuất vào `alfworld_eval/<tag>/` trong run được chọn. Tag đã tồn tại sẽ báo lỗi;
-đổi `--tag` để chạy fresh một lượt khác, kể cả lần trước bị gián đoạn. Bỏ `--tag`
-để tự tạo timestamp. Thư mục chỉ có `complete.json` sau khi đủ mọi task/seed/checkpoint.
-
-## 6. Tìm metrics, checkpoint, trace và cost
+Trong mỗi method output:
 
 ```text
-outputs/alfworld_qwen3_cmt_s42/cmt_opd/
-  resolved_config.yaml
-  run_metadata.json
-  metrics.jsonl                         # loss/selector/cost + alfworld metrics
-  checkpoint-000050/                    # HF model/tokenizer + optimizer.pt
-  final/
-  alfworld_episodes/rank-00000/*.jsonl   # train episode traces, mỗi rank riêng
-  training_cost.jsonl                   # cost logger hiện có
-  training_cost_summary.json
-  tensorboard/                         # loss/selector/cost + alfworld/*
-  alfworld_eval/<tag>/
-    plan.json
-    resolved_config.yaml
-    complete.json
-    summary.json                       # mỗi checkpoint, split và task type
-    summary.csv                        # mean/std/n/display cho từng metric
-    per_seed.csv
-    task_results.jsonl                 # mỗi task ID, thống kê qua seed
-    step-000050/
-      summary.json
-      seed-42/
-        episodes.jsonl                 # đủ ID + OOD, sorted theo split/task ID
-        summary.json
-        rank-00000.jsonl               # shard streaming, giữ được nếu bị ngắt
-        rank-00000.log
+resolved_config.yaml                          # protocol manifest/fingerprint
+metrics.jsonl                                 # alfworld metrics + selector/loss/cost
+alfworld_episodes/rank-XXXXX/*.jsonl             # active episodes từng rank
+alfworld_rollout_diagnostics/*.json             # rates/top actions, lưu trước guard
+alfworld_failures/*.jsonl                       # zero-actor diagnostics khi fail-fast
+training_cost.jsonl / training_cost_summary.json
+tensorboard/                                  # alfworld/*, cost/*, selector metrics
+checkpoint-N/ / final/
 ```
 
-Train traces có full input IDs, actor positions, từng response/action/observation/
-reward/success, ranh giới lượt/episode và lý do dừng. Có thể tắt phần token IDs
-trong trace bằng `--set alfworld.trace_token_ids=false` để giảm dung lượng, nhưng
-tensor actor mask/positions dùng trong training vẫn đầy đủ.
+Actor mask/indexing trong tensors không bị thay đổi khi tắt token IDs trong trace
+bằng `--set alfworld.trace_token_ids=false`. Model scoring dùng full history và
+causal p-1 alignment. Dòng parser-error feedback là context, không phải actor target.
 
-Cost/tensorboard dùng logger cũ: rollout + simulator time nằm trong rollout wall
-time, có scoring/backward/optimizer/checkpoint time và peak memory. So sánh overhead
-với OPD bằng `COST_OPD_BASELINE=<opd output>/training_cost_summary.json` sau khi đã
-có OPD baseline cùng workload. Signature so sánh đã tính cả cấu hình ALFWorld.
-
-## 7. Actor clock và tính đúng của objective
-
-Mỗi hàng trajectory là **một episode**. `input_ids [B,S]` giữ mọi token trong
-full interaction. `actor_token_mask [B,S]` chỉ bật token do student sinh.
-`actor_positions [B,A]` liệt kê vị trí vật lý của những token đó; `response_ids`
-và `valid_mask [B,A]` là trục actor compact, padding bên phải. Token actor ở vị trí
-`p` lấy logits tại `p-1`, với đúng history và observation trước nó. Scoring và
-backward gọi chung một hàm indexing để tránh lệch causal shift.
-
-OPD giữ weights đồng đều trên valid actor tokens. TA giữ local teachability và
-hard top-rho toàn cục. IW giữ sampled-token PPO objective và prefix discrepancy
-tích lũy qua mọi lượt trong cùng hàng. CMT giữ Student-Top-K local gain, union
-common-mass kernel, root-centered successor excess và constrained Gibbs allocation
-theo PPO group đang có. Teacher-only Top-K không được thêm vào OPD policy loss.
-
-Thay đổi cần thiết cho multi-turn là **đồng hồ quyết định**: chỉ actor tokens
-chiếm bước trong IW prefix/CMT scan. Từ actor token cuối lượt trước tới actor token
-đầu lượt sau, observation/chat envelope là conditioning context có loss bằng 0;
-không chèn tỷ số policy hay discount cho các token môi trường. Recurrence vì vậy
-đi qua ranh giới lượt, nhưng luôn dừng tại ranh giới episode/hàng. Đây là rollout
-ước lượng trên đường đi môi trường thực tế, không marginalize các observation
-counterfactual. Không thay Student Top-K/PPO loss hoặc các công thức selector.
-
-vLLM sync current student weights **một lần trước cả batch episode**, sleep sau
-khi mọi local episode kết thúc. Không có FSDP collective giữa các lượt; các rank
-có số lượt khác nhau vẫn đi qua đúng collective schedule của trainer hiện có.
-Không dùng teacher-generated turn hay curriculum của Guided-OPD
-([bài tham khảo](https://aclanthology.org/2026.emnlp-main.1424/)).
-
-## 8. Tests
-
-CPU/mock, không cần model weights/vLLM/GPU:
+CPU/mock regression và real simulator test:
 
 ```bash
-"$PYTHON_BIN" -m pytest -q tests/test_alfworld_multiturn.py tests/test_alfworld_evaluation.py
+python3 -m pytest -q tests/test_alfworld_protocol_v2.py \
+  tests/test_alfworld_ppo_normalizer.py tests/test_alfworld_multiturn.py \
+  tests/test_alfworld_evaluation.py tests/test_alfworld_runtime.py
+
+ALFWORLD_REAL_DATA="$STORAGE_ROOT/nlp/minhpn19/data/ALFworld" \
+python3 -m pytest -q tests/test_alfworld_multiturn.py
 ```
 
-Thêm actual simulator smoke, dùng đúng ba raw parquet đã tải:
+Optional GPU mechanics test dùng **mô hình ngẫu nhiên nhỏ** và scripted real
+trajectory, không phải trained-agent performance:
 
 ```bash
 ALFWORLD_REAL_DATA="$STORAGE_ROOT/nlp/minhpn19/data/ALFworld" \
-  "$PYTHON_BIN" -m pytest -q tests/test_alfworld_multiturn.py tests/test_alfworld_evaluation.py
+ALFWORLD_TEST_TOKENIZER="$STORAGE_ROOT/$STUDENT_MODEL" \
+python3 -m pytest -q -s tests/test_alfworld_v2_gpu.py
 ```
 
-Tests chạy mô hình Qwen3 nhỏ khởi tạo ngẫu nhiên trên CPU để so causal logits với
-full forward, kiểm tra loss targets chỉ gồm actor và teacher không nhận gradient, backward bằng
-trainer thật cho cả bốn phương pháp, CMT cross-turn/IW prefix reset, parquet/split
-isolation, seed độc lập, checkpoint selection, output aggregation/no overwrite và
-resume protocol. Không tự động khởi chạy full multi-GPU training.
+Các file scientific objective/selector khác giữ nguyên. Audit có danh sách sửa,
+phản ví dụ PPO, validation thực tế và các kiểm tra B200/model còn chưa xác minh.
 
-Kết quả kiểm tra local ngày 2026-11-08: nhóm test liên quan đạt **134 passed**
-(17 subtests); toàn repo **327 passed, 7 failed, 1 skipped** (44 subtests).
-Cả 7 test fail cũng fail trên bản HEAD sạch `279511c`: legacy avg@16 CSV merge,
-config RAC legacy, phiên bản math prompt protocol, 3 test GRPO reward và một
-expectation về giá trị padding trung tính của IW. Không có thay đổi công thức
-OPD/TA/IW/CMT trong phần triển khai ALFWorld.
-
-Đã kiểm tra thêm 12 real simulator smoke game, đủ 6 task types ở cả ID và OOD,
-bằng walkthrough dùng riêng cho diagnostic; cả 12 hoàn thành. Đây không phải
-điểm success rate của model. Tokenizer/config chính thức Qwen3-4B và Qwen3-1.7B
-cũng đã được tải riêng để kiểm tra tương thích token IDs và append-only chat.
+Validation cuối: **404 passed, 7 failed, 1 skipped, 46 subtests passed**. Cả 7 lỗi
+được tái hiện trên HEAD sạch trước sửa; chi tiết từng lỗi nằm trong audit. GPU
+toy OPD/CMT và real scripted ID/OOD three-seed checks đã chạy, nhưng student/teacher
+probe bằng model thật và vLLM/FSDP B200 smoke cần chạy ở máy đích.

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -204,6 +204,7 @@ def build_student_topk_opd_reference(
     valid_mask: torch.Tensor,
     *,
     top_k: int,
+    full_vocab_ppo: bool = False,
 ) -> TopKOPDReference:
     """Build a policy-loss reference on exactly the configured Student Top-K.
 
@@ -212,6 +213,10 @@ def build_student_topk_opd_reference(
     absent from this API. ``top_k`` validates the candidate width selected by
     the current experiment, making it impossible to pass the 2K selector union
     into the differentiable OPD loss during a Top-K ablation.
+
+    ALFWorld v2 opts into ``full_vocab_ppo`` to keep current/frozen normalization
+    consistent. The default retains legacy single-turn behavior; see the
+    versioned repair and identity-ratio counterexample in ALFWORLD_PROTOCOL_AUDIT.md.
     """
     expected_top_k = int(top_k)
     if expected_top_k <= 0:
@@ -221,13 +226,20 @@ def build_student_topk_opd_reference(
             "OPD loss support must contain exactly the configured Student Top-K "
             f"IDs (K={expected_top_k}); got K={student_top_k_ids.shape[-1]}"
         )
-    return build_topk_opd_reference(
+    reference = build_topk_opd_reference(
         student_top_k_ids,
         student_top_k_log_probs,
         teacher_on_student_log_probs,
         valid_mask,
         support_mask=None,
     )
+    if full_vocab_ppo:
+        # ALFWorld v2: frozen scores are normalized over V, so current scores
+        # must also be normalized over V. Conditionalizing only current scores
+        # on S gives ratio=1/p(S) for the unchanged policy and can zero gradients
+        # via PPO clipping. Keep legacy math/v1 behavior unless explicitly opted in.
+        reference = replace(reference, support_mask=None)
+    return reference
 
 
 def topk_reference_from_logits(
@@ -336,12 +348,8 @@ def topk_candidate_ppo_loss(
     # objective boundary.
     if advantages.ndim == 1:
         if advantages.shape[0] != ratio.shape[0]:
-            raise ValueError(
-                "Trajectory advantages must have one value per PPO row"
-            )
-        advantages = advantages.reshape(
-            advantages.shape[0], *([1] * (ratio.ndim - 1))
-        )
+            raise ValueError("Trajectory advantages must have one value per PPO row")
+        advantages = advantages.reshape(advantages.shape[0], *([1] * (ratio.ndim - 1)))
     elif advantages.ndim == 2 and advantages.shape == ratio.shape[:2]:
         advantages = advantages.unsqueeze(-1)
     elif (
@@ -349,9 +357,7 @@ def topk_candidate_ppo_loss(
         and advantages.shape[0] == ratio.shape[0]
         and advantages.shape[1] == 1
     ):
-        advantages = advantages.reshape(
-            advantages.shape[0], *([1] * (ratio.ndim - 1))
-        )
+        advantages = advantages.reshape(advantages.shape[0], *([1] * (ratio.ndim - 1)))
     elif advantages.ndim != ratio.ndim:
         raise ValueError(
             "Advantages must be [B], [B,T], or candidate-wise [B,T,K]; "

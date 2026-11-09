@@ -14,7 +14,7 @@ export TRAIN_DATASET=custom
 export TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-nlp/minhpn19/data/ALFworld/train-00000-of-00001.parquet}"
 export TRAIN_PROMPT_KEY=id
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
-export RUN_NAME="${RUN_NAME:-alfworld_${METHOD}_$(date +%Y%m%d_%H%M%S_%N)}"
+export RUN_NAME="${RUN_NAME:-alfworld_v2_${METHOD}_$(date +%Y%m%d_%H%M%S_%N)}"
 export SEED="${SEED:-42}"
 export ROLLOUT_SEED="${ROLLOUT_SEED:-${SEED}}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-8}"       # global tasks per rollout
@@ -32,6 +32,10 @@ export MAX_STEPS="${MAX_STEPS:-1000}"                    # total target, also on
 export LR="${LR:-5.0e-6}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-50}"
 export TRAIN_EVAL_ENABLED=false
+export ACTION_PROMPT_MODE="${ACTION_PROMPT_MODE:-admissible}"
+export COLLAPSE_GUARD_MODE="${COLLAPSE_GUARD_MODE:-error}"
+# Diagnostics are off by default; when enabled compare processed sampling LPs.
+export VLLM_LOGPROB_SANITY_FAIL="${VLLM_LOGPROB_SANITY_FAIL:-true}"
 export TOKEN_SCORE_INTERVAL="${TOKEN_SCORE_INTERVAL:-50}"
 export RESUME_FROM_CHECKPOINT="${RESUME_FROM_CHECKPOINT:-${RESUME:-}}"
 # ========================================================
@@ -51,5 +55,7 @@ run_training_cli train --config "${REPO_DIR}/configs/alfworld_multiturn.yaml" \
   --set "alfworld.max_turns=${MAX_TURNS}" \
   --set "alfworld.max_turn_tokens=${MAX_TURN_TOKENS}" \
   --set "alfworld.max_episode_tokens=${MAX_EPISODE_TOKENS}" \
+  --set "alfworld.action_prompt_mode=${ACTION_PROMPT_MODE}" \
+  --set "alfworld.collapse_guard.mode=${COLLAPSE_GUARD_MODE}" \
   --set "alfworld.env_workers=${ENV_WORKERS:-4}" \
   --set "alfworld.env_timeout_sec=${ENV_TIMEOUT_SEC:-60}" "$@"

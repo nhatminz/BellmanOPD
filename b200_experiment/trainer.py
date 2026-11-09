@@ -3321,6 +3321,10 @@ def _run_grpo_training(
 def run_training(
     config: dict[str, Any], command_line: list[str] | None = None
 ) -> dict[str, Any]:
+    if config.get("alfworld", {}).get("enabled", False):
+        from .alfworld_protocol import resolve_protocol
+
+        config = resolve_protocol(config)
     distributed_cfg = config.get("distributed", {})
     distributed = initialize_distributed(distributed_cfg.get("backend", "nccl"))
     device = distributed.device
@@ -4039,6 +4043,7 @@ def run_training(
                 config,
                 device,
                 episode_seeds,
+                distributed,
             )
             import uuid
 
@@ -4065,34 +4070,48 @@ def run_training(
                             )
                             + "\n"
                         )
-            local_episode_stats = {
-                "episodes": sum(active_trajectories.tolist()),
-                "successes": sum(
-                    t["success"]
-                    for active, t in zip(
-                        active_trajectories.tolist(), rollout.episode_traces
+            from .alfworld_diagnostics import (
+                distributed_episode_metrics,
+                check_collapse,
+            )
+
+            active_traces = [
+                t
+                for active, t in zip(
+                    active_trajectories.tolist(), rollout.episode_traces
+                )
+                if active
+            ]
+            episode_stats = distributed_episode_metrics(active_traces, distributed)
+            episode_stats.update(
+                protocol_version=config["alfworld"]["protocol_version"],
+                protocol_fingerprint=config["alfworld"]["protocol_fingerprint"],
+            )
+            diagnostic_file = (
+                output_dir
+                / "alfworld_rollout_diagnostics"
+                / episode_file.with_suffix(".json").name
+            )
+            if distributed.is_main:
+                diagnostic_file.parent.mkdir(parents=True, exist_ok=True)
+                diagnostic_file.write_text(
+                    json.dumps(
+                        {
+                            "optimizer_step_before_rollout": optimizer_step,
+                            "rollout_index": rollout_index,
+                            **episode_stats,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
                     )
-                    if active
-                ),
-                "turns": sum(
-                    len(t["turns"])
-                    for active, t in zip(
-                        active_trajectories.tolist(), rollout.episode_traces
-                    )
-                    if active
-                ),
-                "invalid_actions": sum(
-                    t["invalid_actions"]
-                    for active, t in zip(
-                        active_trajectories.tolist(), rollout.episode_traces
-                    )
-                    if active
-                ),
-            }
-            episode_stats = {
-                key: distributed.sum_int(value)
-                for key, value in local_episode_stats.items()
-            }
+                    + "\n",
+                    encoding="utf-8",
+                )
+                tensorboard_logger.write_alfworld_rollout(optimizer_step, episode_stats)
+            distributed.barrier()
+            # All ranks see identical reduced diagnostics and stop together.
+            # Traces are already on disk before a fail-fast guard is evaluated.
+            check_collapse(episode_stats, config["alfworld"])
         else:
             encoded, _ = tokenize_prompts(
                 prompt_records, tokenizer, config["data"], device
@@ -4295,6 +4314,8 @@ def run_training(
                 teacher_scores.candidate_log_probs,
                 valid,
                 top_k=top_k,
+                full_vocab_ppo=is_alfworld
+                and int(config["alfworld"].get("protocol_version", 1)) >= 2,
             )
             if not torch.equal(opd_reference.candidate_ids, student_scores.top_k_ids):
                 raise AssertionError(
@@ -4355,7 +4376,17 @@ def run_training(
 
         vllm_logprob_sanity: dict[str, Any] = {"enabled": False}
         sanity = dict(config["rollout"].get("vllm", {}).get("logprob_sanity", {}))
-        if rollout_backend == "vllm" and bool(sanity.get("enabled", False)):
+        if (
+            is_alfworld
+            and rollout_backend == "vllm"
+            and bool(sanity.get("enabled", False))
+        ):
+            from .alfworld_logprob_debug import compare_multiturn_logprobs
+
+            vllm_logprob_sanity = compare_multiturn_logprobs(
+                training_student, rollout, config, distributed
+            )
+        elif rollout_backend == "vllm" and bool(sanity.get("enabled", False)):
             comparable = valid & torch.isfinite(rollout.rollout_log_probs)
             differences = (
                 rollout.rollout_log_probs[comparable]
@@ -5079,6 +5110,11 @@ def run_training(
                         "invalid_action_rate": episode_stats["invalid_actions"]
                         / max(episode_stats["turns"], 1),
                         "episode_trace": str(episode_file),
+                        "rollout_diagnostics": str(diagnostic_file),
+                        "student_teacher_topk_overlap": student_teacher_topk_overlap,
+                        "student_topk_mass": student_topk_mass_stats["mean"],
+                        "teacher_topk_mass": teacher_topk_mass_stats["mean"],
+                        "gradient_norm": aggregated_train_metrics["gradient_norm"],
                     }
                 }
                 if is_alfworld

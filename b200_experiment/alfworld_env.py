@@ -63,8 +63,9 @@ def configure_native_site():
 
 def validate_settings(config):
     settings = config["alfworld"]
-    if settings.get("protocol_version", 1) != 1:
-        raise ValueError("Unsupported ALFWorld trajectory protocol_version")
+    from .alfworld_protocol import protocol_manifest
+
+    protocol_manifest(config)
     for key in (
         "max_turns",
         "max_turn_tokens",

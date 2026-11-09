@@ -15,7 +15,16 @@ data:
 
 alfworld:
   enabled: true
-  protocol_version: 1
+  protocol_version: 2
+  action_prompt_mode: admissible
+  repeated_action_warning: false
+  invalid_trajectory_filter: none
+  collapse_guard:
+    mode: error
+    min_turns: 32
+    parser_failure_threshold: 0.95
+    look_action_threshold: 0.98
+    repeated_action_threshold: 0.98
   eval_paths:
     eval_in_distribution: nlp/minhpn19/data/ALFworld/eval_in_distribution-00000-of-00001.parquet
     eval_out_of_distribution: nlp/minhpn19/data/ALFworld/eval_out_of_distribution-00000-of-00001.parquet
@@ -41,6 +50,12 @@ rollout:
     max_model_len: 8192
     max_num_seqs: 8
     max_concurrent_requests: 8
+    logprob_sanity:
+      enabled: false
+      max_tokens_per_rank: 32
+      max_tokens_per_turn: 1
+      tolerance: 0.05
+      fail_on_mismatch: true
 
 selector:
   score_micro_batch_size: 1

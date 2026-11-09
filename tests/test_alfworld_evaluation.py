@@ -133,7 +133,10 @@ def test_evaluation_artifacts_independent_of_training_and_never_overwritten(
     def worker(config, selected, seed, directory, devices):
         calls.append((selected["step"], seed))
         return [
-            trace(task, seed, seed != 44)
+            {
+                **trace(task, seed, seed != 44),
+                "protocol_fingerprint": alfconfig["alfworld"]["protocol_fingerprint"],
+            }
             for split in ("eval_in_distribution", "eval_out_of_distribution")
             for task in tasks[split]
         ]
@@ -164,6 +167,39 @@ def test_dry_run_validates_full_splits_without_running_a_model(saved_run):
     )
     assert plan["seeds"] == [42, 43, 44]
     assert not (saved_run / "alfworld_eval").exists()
+
+
+def test_legacy_checkpoint_requires_explicit_changed_protocol_eval(
+    saved_run, alfconfig
+):
+    legacy = copy.deepcopy(alfconfig)
+    legacy["alfworld"].update(protocol_version=1, action_prompt_mode="legacy")
+    from b200_experiment.alfworld_protocol import resolve_protocol
+
+    legacy = resolve_protocol(legacy)
+    save_config(legacy, saved_run / "resolved_config.yaml")
+    before = (saved_run / "resolved_config.yaml").read_bytes()
+    args = args_for(
+        saved_run,
+        set=["alfworld.protocol_version=2", "alfworld.action_prompt_mode=admissible"],
+        dry_run=True,
+    )
+    with pytest.raises(ValueError, match="--allow-protocol-change"):
+        build_plan(args)
+    args.allow_protocol_change = True
+    plan = run_evaluation(args)
+    assert plan["evaluation_protocol_changed"] and plan["protocol_version"] == 2
+    assert plan["protocol_fingerprint"] != plan["training_protocol_fingerprint"]
+    assert (saved_run / "resolved_config.yaml").read_bytes() == before
+
+
+def test_changed_eval_sampling_is_recorded_as_a_protocol_change(saved_run):
+    args = args_for(saved_run, set=["evaluation.temperature=0.7"])
+    with pytest.raises(ValueError, match="protocol differs"):
+        build_plan(args)
+    args.allow_protocol_change = True
+    _, config, _ = build_plan(args)
+    assert config["alfworld"]["protocol_manifest"]["generation"]["temperature"] == 0.7
 
 
 def test_vllm_multi_turn_syncs_once_for_variable_length_episodes(

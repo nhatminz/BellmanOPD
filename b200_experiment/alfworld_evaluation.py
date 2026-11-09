@@ -18,8 +18,15 @@ from pathlib import Path
 from .alfworld_env import SPLITS, load_task_splits
 from .config import apply_overrides, load_config, resolve_runtime_paths, save_config
 from .multiseed_evaluation import checkpoint_step, resolve_run_output
+from .alfworld_protocol import resolve_protocol
+from .alfworld_diagnostics import (
+    RATE_METRICS,
+    episode_metrics,
+    merge_counts,
+    metrics_from_counts,
+)
 
-METRICS = ("success_rate", "average_turns", "invalid_action_rate")
+METRICS = RATE_METRICS
 
 
 def _write_json(path, payload):
@@ -38,18 +45,7 @@ def episode_seed(seed, task):
 
 
 def metrics(traces):
-    n = len(traces)
-    turns = sum(len(t["turns"]) for t in traces)
-    invalid = sum(t["invalid_actions"] for t in traces)
-    return {
-        "episodes": n,
-        "successes": sum(bool(t["success"]) for t in traces),
-        "turns": turns,
-        "invalid_actions": invalid,
-        "success_rate": sum(bool(t["success"]) for t in traces) / max(n, 1),
-        "average_turns": turns / max(n, 1),
-        "invalid_action_rate": invalid / max(turns, 1),
-    }
+    return episode_metrics(traces)
 
 
 def per_seed_results(traces):
@@ -83,23 +79,53 @@ def aggregate(seed_results):
     for split in SPLITS[1:]:
         rows = [s[split] for s in seed_results]
         kinds = sorted({kind for row in rows for kind in row["task_types"]})
-        result[split] = {key: _mean_std([r[key] for r in rows]) for key in METRICS}
+        result[split] = _aggregate_entries(rows)
         result[split]["task_types"] = {
-            kind: {
-                key: _mean_std([r["task_types"][kind][key] for r in rows])
-                for key in METRICS
-            }
+            kind: _aggregate_entries([r["task_types"][kind] for r in rows])
             for kind in kinds
         }
+    return result
+
+
+def _aggregate_entries(rows):
+    result = {key: _mean_std([r[key] for r in rows]) for key in METRICS}
+    reasons = sorted(
+        {key for row in rows for key in row["termination_reason_distribution"]}
+    )
+    result["termination_reason_distribution"] = {
+        key: _mean_std(
+            [row["termination_reason_distribution"].get(key, 0) for row in rows]
+        )
+        for key in reasons
+    }
+    combined = metrics_from_counts(merge_counts([row["raw_counts"] for row in rows]))
+    result["top_responses"] = combined["top_responses"]
+    result["top_actions"] = combined["top_actions"]
     return result
 
 
 def build_plan(args):
     run = resolve_run_output(args.run_output)
     config = load_config(run / "resolved_config.yaml")
+    if not config.get("alfworld", {}).get("enabled", False):
+        raise ValueError("Select an ALFWorld multi-turn training run, not a math run")
+    original_protocol = resolve_protocol(config)["alfworld"]
+    saved_fingerprint = config["alfworld"].get(
+        "protocol_fingerprint", original_protocol["protocol_fingerprint"]
+    )
     if os.environ.get("STORAGE_ROOT"):
         config["paths"]["storage_root"] = os.environ["STORAGE_ROOT"]
-    config = resolve_runtime_paths(apply_overrides(config, args.set))
+    config = apply_overrides(config, args.set)
+    for field in ("temperature", "top_p"):
+        config["rollout"][field] = config["evaluation"][field]
+    config = resolve_runtime_paths(config)
+    changed_protocol = saved_fingerprint != config["alfworld"]["protocol_fingerprint"]
+    if changed_protocol and not getattr(args, "allow_protocol_change", False):
+        raise ValueError(
+            "Evaluation interaction protocol differs from the checkpoint's training protocol. For a separately labeled new-protocol diagnostic, pass --allow-protocol-change and a NEW --tag. Training resume across protocols is rejected."
+        )
+    config["alfworld"]["training_protocol_fingerprint"] = saved_fingerprint
+    config["alfworld"]["evaluation_protocol_changed"] = changed_protocol
     if not config.get("alfworld", {}).get("enabled", False):
         raise ValueError("Select an ALFWorld multi-turn training run, not a math run")
     method = config["experiment"]["method"]
@@ -164,21 +190,26 @@ def worker(args):
 
     config = load_config(args.worker_config)
     tasks = load_task_splits(config)
+    probe = config.get("alfworld_probe")
+    selected_splits = [probe["split"]] if probe else SPLITS[1:]
     selected = [
         task
-        for split in SPLITS[1:]
-        for i, task in enumerate(tasks[split])
+        for split in selected_splits
+        for i, task in enumerate(
+            tasks[split][: probe["limit"]] if probe else tasks[split]
+        )
         if i % args.world_size == args.rank
     ]
     config = copy.deepcopy(config)
-    config["models"]["student_path"] = args.checkpoint
+    if not probe:
+        config["models"]["student_path"] = args.checkpoint
     tokenizer = load_student_tokenizer(config)
     stop_ids = generation_stop_token_ids(tokenizer, config)
     settings = config["evaluation"]
     vcfg = settings["vllm"]
     engine_kwargs = {
         "model": args.checkpoint,
-        "tokenizer": args.checkpoint,
+        "tokenizer": config["models"]["student_path"],
         "dtype": config["models"].get("dtype", "bfloat16"),
         "trust_remote_code": True,
         "generation_config": "vllm",
@@ -318,7 +349,23 @@ def run_evaluation(args, *, worker_runner=run_workers):
         "checkpoints": checkpoints,
         "tasks": {s: len(splits[s]) for s in SPLITS[1:]},
         "fresh_episodes": True,
+        "protocol_version": config["alfworld"]["protocol_version"],
+        "protocol_fingerprint": config["alfworld"]["protocol_fingerprint"],
+        "protocol_manifest": config["alfworld"]["protocol_manifest"],
+        "training_protocol_fingerprint": config["alfworld"][
+            "training_protocol_fingerprint"
+        ],
+        "evaluation_protocol_changed": config["alfworld"][
+            "evaluation_protocol_changed"
+        ],
         "std_definition": "sample standard deviation across seeds (ddof=1)",
+        "training_only_metrics": {
+            "student_teacher_topk_overlap": None,
+            "student_topk_mass": None,
+            "teacher_topk_mass": None,
+            "gradient_norm": None,
+        },
+        "training_only_metrics_note": "Standalone episode eval loads no teacher and performs no backward; these diagnostics are recorded in training metrics/TensorBoard, not fabricated at inference.",
     }
     if args.dry_run:
         print(json.dumps(plan, indent=2))
@@ -359,6 +406,13 @@ def run_evaluation(args, *, worker_runner=run_workers):
                 if any(t["evaluation_seed"] != seed for t in traces):
                     raise RuntimeError(
                         "Worker returned results for a different evaluation seed"
+                    )
+                if any(
+                    t.get("protocol_fingerprint") != plan["protocol_fingerprint"]
+                    for t in traces
+                ):
+                    raise RuntimeError(
+                        "Worker episode protocol fingerprint differs from this evaluation; refusing mixed-protocol summary"
                     )
                 traces.sort(key=lambda t: (t["split"], t["task_id"]))
                 with (directory / "episodes.jsonl").open(
@@ -465,6 +519,11 @@ def parser():
     result.add_argument("--gpus", default=os.environ.get("CUDA_VISIBLE_DEVICES", "0"))
     result.add_argument("--set", action="append", default=[])
     result.add_argument("--dry-run", action="store_true")
+    result.add_argument(
+        "--allow-protocol-change",
+        action="store_true",
+        help="Explicitly re-evaluate a legacy checkpoint under a changed interaction protocol, in a new output namespace; never changes the checkpoint",
+    )
     result.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     result.add_argument("--worker-config", help=argparse.SUPPRESS)
     result.add_argument("--checkpoint", help=argparse.SUPPRESS)
