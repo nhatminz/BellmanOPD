@@ -86,7 +86,14 @@ class AppendOnlyChat:
 
 
 def collect_episode(
-    task, tokenizer, config, generate, seed, *, env_factory=EnvironmentClient
+    task,
+    tokenizer,
+    config,
+    generate,
+    seed,
+    *,
+    env_factory=EnvironmentClient,
+    environment_seed=None,
 ):
     config = resolve_protocol(config)
     settings = config["alfworld"]
@@ -99,11 +106,13 @@ def collect_episode(
     ids, positions, turns, log_probs = [], [], [], []
     reason, success, invalid = "max_turns", False, 0
     previous_action = None
+    reset_seed = int(seed if environment_seed is None else environment_seed)
     trace = {
         "task_id": task["id"],
         "task_type": task["task_type"],
         "split": task["split"],
         "seed": int(seed),
+        "environment_seed": reset_seed,
         "game_fingerprint": task["game_fingerprint"],
         "turns": turns,
         "protocol_version": version,
@@ -114,7 +123,7 @@ def collect_episode(
     }
     try:
         try:
-            state = env.reset(seed)
+            state = env.reset(reset_seed)
         except TimeoutError:
             state = None
             reason = "environment_reset_timeout"

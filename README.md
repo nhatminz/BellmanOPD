@@ -295,6 +295,15 @@ và mean alignment/V/weight. `plot_training_progress.sh` hỗ trợ
 Một method tạo sáu đường benchmark (thêm GPQA-Diamond và AMC23); từ hai method trở lên tạo sáu subplot benchmark,
 mỗi subplot có một đường cho từng method. `PLOT_METHOD=both` vẫn tương thích và có nghĩa TA+RAC.
 
+## Eval ALFWorld nhiều checkpoint
+
+ALFWorld nhiều checkpoint: sửa `CHECKPOINTS` trong
+[`scripts/eval_alfworld_multiseed.sh`](scripts/eval_alfworld_multiseed.sh), rồi chạy
+`ALFWORLD_EVAL_GPUS=0,1 bash scripts/eval_alfworld_multiseed.sh`. Mặc định tám
+episode mới/task/seed, ba seed 42/43/44, avg@8/pass@8 mean ± sample std, có tqdm
+và summary riêng từng checkpoint cùng summary so sánh. Chi tiết trong
+[`ALFWORLD_MULTITURN.md`](ALFWORLD_MULTITURN.md#5-eval-nhiều-checkpoint-avg8pass8-3-seed-và-summary-).
+
 ## Eval MMLU-Pro
 
 Eval thêm MMLU-Pro trên ba seed 42/43/44, GPU 0,1: sửa danh sách checkpoint

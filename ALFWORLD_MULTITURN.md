@@ -240,7 +240,107 @@ Giữ model/data/seed/sampling/batch/LR/token limits như run gốc. Checkpoint 
 optimizer.pt. Không resume optimizer/checkpoint protocol v1 vào v2. Tên run cũ,
 metrics, checkpoint và summary cũ không bị ghi đè.
 
-## 5. Eval 3 seed, ID/OOD và summary ±
+## 5. Eval nhiều checkpoint: avg@8/pass@8, 3 seed và summary ±
+
+Mở `scripts/eval_alfworld_multiseed.sh`, thêm các đường dẫn checkpoint vào
+`CHECKPOINTS=(...)`. Một đường dẫn trong dấu ngoặc kép trên mỗi dòng, **không
+có dấu phẩy**. Có thể trộn OPD/TA/CMT/IW; method và protocol được đọc từ
+`resolved_config.yaml` cạnh từng checkpoint:
+
+```bash
+CHECKPOINTS=(
+  "${STORAGE_ROOT}/nlp/minhpn19/BellmanOPD_analysis/outputs/alfworld_v2_opd_20261109_093150_093055241/opd_opd/checkpoint-000400"
+  # "${STORAGE_ROOT}/nlp/minhpn19/BellmanOPD_analysis/outputs/TEN_RUN/cmt_opd/checkpoint-000400"
+  # "${STORAGE_ROOT}/nlp/minhpn19/BellmanOPD_analysis/outputs/TEN_RUN/ta_opd/final"
+)
+SEEDS=(42 43 44)
+```
+
+Sau khi sửa danh sách, chạy trên hai GPU:
+
+```bash
+export STORAGE_ROOT=/workspace/storage-shared
+cd "$STORAGE_ROOT/nlp/minhpn19/BellmanOPD_analysis"
+
+# Kiểm tra đường dẫn, split và protocol; không load model/chưa dùng GPU.
+ALFWORLD_EVAL_GPUS=0,1 bash scripts/eval_alfworld_multiseed.sh --dry-run
+
+# Full ID/OOD, từng checkpoint lần lượt, seed 42/43/44.
+ALFWORLD_EVAL_GPUS=0,1 bash scripts/eval_alfworld_multiseed.sh
+```
+
+Muốn bốn GPU: đổi `ALFWORLD_EVAL_GPUS=0,1` thành `ALFWORLD_EVAL_GPUS=0,1,2,3`.
+Mỗi GPU giữ một bản model TP=1 và nhận một phần task; tám sample của cùng task
+chạy lần lượt trên GPU nhận task đó. Tqdm ở terminal hiển thị checkpoint và
+số **episode hoàn tất** của mỗi seed; log model/worker nằm trong folder kết quả.
+
+Chế độ danh sách mặc định `EPISODES_PER_TASK=8`: với **mỗi seed**, mỗi task
+được chạy tám episode simulator hoàn toàn mới. Trong tám lần thử, reset bằng
+cùng environment seed để so trên cùng điều kiện khởi đầu; policy sampling seed
+khác nhau và được ghi cùng `sample_index=0..7` trong trace. Mỗi lượt vẫn chỉ
+sinh **một action**, không lấy tám action rồi chọn action tốt nhất. Không dùng
+oracle, action projection hoặc replay của episode trước.
+
+Với `c_i` là số episode thành công trong tám lần thử task `i`, tổng `N` task:
+
+- `avg@8 = sum(c_i)/(8N)`; tương đương success rate trên toàn bộ tám episode/task.
+- `pass@8 = sum(c_i > 0)/N`; thành công nếu ít nhất một trong tám episode thắng.
+- Thành công đọc từ simulator `state.won`, giữ nguyên protocol/giới hạn của run.
+- Tính cả hai metric từ **cùng tám episode**, theo từng split ID/OOD và task type.
+- `±` dùng **sample standard deviation giữa seed 42/43/44, ddof=1**. Không gộp
+  ba seed thành một tập 24 episode để tính pass@8.
+
+Với bản dataset 140 ID +134 OOD, tổng là **6.576 episode/checkpoint** qua ba
+seed. Đây là tám lần nhiều episode hơn giao thức cũ chỉ có SR một lần/task/seed.
+Sampling mặc định đọc từ evaluation config của run (v2 thường temperature=1,
+top_p=1); không tự đổi giao thức prompt/action hay giới hạn episode.
+
+Tag tự sinh theo timestamp, ví dụ `alfworld_avg8_pass8_20261110_153045_123456789`.
+Kết quả riêng cho checkpoint ví dụ của bạn:
+
+```text
+outputs/alfworld_v2_opd_20261109_093150_093055241/opd_opd/
+  alfworld_eval/<tag>/checkpoint-000400/
+    plan.json
+    resolved_config.yaml
+    summary.json
+    summary.csv
+    per_seed.csv
+    task_results.jsonl
+    step-000400/seed-42/episodes.jsonl
+    step-000400/seed-42/summary.json
+    step-000400/seed-42/rank-00000.log
+    complete.json
+```
+
+`summary.json` có `aggregate.eval_in_distribution.avg_at_8`/`pass_at_8` và
+`eval_out_of_distribution` trong từng phần tử `results`, gồm mean/std/n/display
+và `display_percent`, ví dụ `45.20 ± 0.31`. CSV cũng có cột phần trăm này.
+`task_results.jsonl` giữ summary theo task với `n=3` seed, không phải n=24 episode.
+
+Summary **so sánh tất cả checkpoint trong danh sách** nằm tại:
+
+```text
+outputs/alfworld_eval/<tag>/summary.json
+outputs/alfworld_eval/<tag>/summary.csv
+```
+
+Một checkpoint lỗi sẽ được ghi vào `failures` trong summary chung; chương trình
+tiếp tục checkpoint kế tiếp và chỉ trả exit code 1 sau khi đã thử hết danh sách.
+Mỗi checkpoint có namespace riêng nên nhiều step cùng run không đè kết quả nhau.
+Tag đã tồn tại bị từ chối; dùng tag mới cho lần chạy khác hoặc lần bị gián đoạn.
+Code không ghi đè history toán hoặc kết quả ALFWorld cũ, không tự trộn protocol.
+
+Nếu muốn truyền danh sách trực tiếp thay vì sửa file:
+
+```bash
+ALFWORLD_EVAL_GPUS=0,1 bash scripts/eval_alfworld_multiseed.sh \
+  --checkpoint-paths \
+    "$PWD/outputs/TEN_RUN/opd_opd/checkpoint-000400" \
+    "$PWD/outputs/TEN_RUN/opd_opd/checkpoint-000800"
+```
+
+### Cú pháp cũ theo một run vẫn được hỗ trợ
 
 Ví dụ eval CMT mới trên 2 GPU:
 
@@ -249,7 +349,8 @@ bash scripts/eval_alfworld_multiseed.sh \
   --method cmt \
   --run-output "$PWD/outputs/alfworld_v2_cmt_s42/cmt_opd" \
   --checkpoints 50 150 final \
-  --seeds 42 43 44 --gpus 0,1 --tag id_ood_v2_s42_43_44
+  --seeds 42 43 44 --gpus 0,1 --episodes-per-task 8 \
+  --tag id_ood_v2_avg8_pass8_s42_43_44
 ```
 
 4 GPU: thay `--gpus 0,1` bằng `--gpus 0,1,2,3`. Chỉ chọn checkpoint tồn tại.
@@ -263,14 +364,15 @@ for METHOD in opd ta cmt iw; do
     --method "$METHOD" \
     --run-output "$PWD/outputs/alfworld_v2_${METHOD}_s42/${METHOD}_opd" \
     --checkpoints 50 150 final \
-    --seeds 42 43 44 --gpus 0,1 --tag id_ood_v2_s42_43_44
+    --seeds 42 43 44 --gpus 0,1 --episodes-per-task 8 \
+    --tag id_ood_v2_avg8_pass8_s42_43_44
 done
 ```
 
-Mỗi checkpoint/seed chạy mới toàn bộ 140 ID +134 OOD, 1 episode/task/seed,
-không replay và không dùng math avg@8/pass@8. Sampling eval mặc định bằng rollout
-v2: temperature=1, top_p=1. Seed theo task ID, không theo GPU partition.
-`--dry-run` kiểm tra plan mà không chạy model.
+Cú pháp `--run-output ... --checkpoints ...` không có `--episodes-per-task 8`
+vẫn giữ chế độ cũ **1 episode/task/seed**, chỉ có SR và diagnostics. Các lệnh
+ở trên đã ghi rõ `--episodes-per-task 8` để lấy avg@8/pass@8. Các probe student/
+teacher vẫn chạy một episode/task; training cũng giữ nguyên seed/rollout.
 
 Kết quả ở `<run-output>/alfworld_eval/<tag>/`:
 
