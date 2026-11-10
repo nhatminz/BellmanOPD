@@ -856,6 +856,7 @@ _RESUME_COMPATIBILITY_DEFAULTS = {
     "selector.cmt_correction_mode": "none",
     "selector.cmt_correction_quantile": 0.99,
     "selector.cmt_final_allocation_kl": 0.02,
+    "selector.cmt_random_weight_control": False,
 }
 
 
@@ -930,6 +931,7 @@ def validate_resume_config(
         "selector.cmt_correction_mode",
         "selector.cmt_correction_quantile",
         "selector.cmt_final_allocation_kl",
+        "selector.cmt_random_weight_control",
         "selector.cmt_gamma",
         "selector.cmt_successor_lambda",
         "selector.cmt_full_vocab_diagnostics",

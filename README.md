@@ -1,5 +1,12 @@
 # Pure OPD vs TA-OPD vs CMT vs GRPO trên NVIDIA B200
 
+Random-permuted-weight control cho CMT/PROW, giữ nguyên multiset final weights,
+mean-one, realized KL và clipping của từng PPO group: xem
+[`RUN_CMT_RANDOM_CONTROL_B200.md`](RUN_CMT_RANDOM_CONTROL_B200.md).
+Launcher `scripts/train_cmt_random_control_compe_math_4b_17b_1epoch.sh both`
+chạy original/control cùng Qwen3-4B → Qwen3-1.7B, Competition-MATH một epoch,
+tắt eval khi train rồi eval checkpoint cuối seed 42/43/44 với avg@8/pass@8 ±.
+
 Train/eval ALFWorld multi-turn thật với CMT/OPD/TA/IW, teacher Qwen3-4B và student
 Qwen3-1.7B: [`ALFWORLD_MULTITURN.md`](ALFWORLD_MULTITURN.md).
 Protocol v2 sửa parser/action menu, giữ observation sau lỗi và chuẩn hóa PPO;

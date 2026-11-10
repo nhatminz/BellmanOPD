@@ -136,6 +136,11 @@ from .selectors import (
     validate_cmt_correction,
 )
 from .selectors.pgt_selector import PGTOutput
+from .cmt_random_control import (
+    CONTROL_FIELDS,
+    permute_final_cmt_weights,
+    random_weight_control_enabled,
+)
 from .selectors.base import SelectorOutput, robust_quantile_normalize, scatter_valid
 from .tensorboard_logging import TensorBoardLogger
 from .vllm_evaluation import (
@@ -817,6 +822,7 @@ def _append_train_metrics_csv(path: Path, metrics: dict[str, Any]) -> None:
         "normalized_ess",
         "max_token_probability",
         "allocation_solver_status",
+        *CONTROL_FIELDS,
     )
     statistics = tuple(
         f"{score}_{statistic}"
@@ -1851,6 +1857,11 @@ def _opd_train_step(
     if (gibbs_scores is None) != (gibbs_epsilon is None):
         raise ValueError("gibbs_scores and gibbs_epsilon must be provided together")
     use_groupwise_gibbs = gibbs_scores is not None
+    random_weight_control = random_weight_control_enabled(config)
+    if random_weight_control and not use_groupwise_gibbs:
+        raise ValueError(
+            "cmt_random_weight_control requires CMT's groupwise allocation"
+        )
     if gibbs_scores is not None and gibbs_scores.shape != objective_valid.shape:
         raise ValueError("gibbs_scores must align with the token-level objective mask")
     grouped_ids: tuple[tuple[int, ...], ...] | None = None
@@ -2028,6 +2039,45 @@ def _opd_train_step(
                 weight_max=gibbs_weight_max,
                 final_epsilon=gibbs_final_epsilon,
             )
+            # Controlled ablation: reassign ONLY final allocation weights on
+            # this globally gathered optimizer group's valid-token domain.
+            # Scores/support/examples and the original solver stay untouched.
+            current_optimizer_step = optimizer_step_start + len(minibatch_metrics) + 1
+            group_token_count = int(global_group_weights.numel())
+            control_metrics = {
+                "cmt_random_weight_control": random_weight_control,
+                "cmt_weight_assignment": "random_permuted_final_weights"
+                if random_weight_control
+                else "score_aligned_cmt",
+                "cmt_weight_mean": float(global_group_weights.detach().double().mean()),
+                "cmt_weight_clip_min": float(gibbs_weight_min),
+                "cmt_weight_clip_max": float(gibbs_weight_max),
+                "cmt_effective_sample_size": float(allocation_metrics["normalized_ess"])
+                * group_token_count,
+                "cmt_permutation_token_count": group_token_count,
+                "cmt_permutation_fixed_points": group_token_count,
+                "cmt_permutation_fixed_point_fraction": 1.0,
+                "cmt_permutation_moved_fraction": 0.0,
+                "cmt_permutation_changed_weight_fraction": 0.0,
+                "cmt_permutation_changed_raw_weight_fraction": 0.0,
+                "cmt_permutation_mean_abs_displacement": 0.0,
+                "cmt_permutation_time_sec": 0.0,
+                "cmt_permutation_seed": None,
+                "cmt_permutation_sha256": None,
+            }
+            if random_weight_control:
+                global_group_raw_weights, global_group_weights, permutation_metrics = (
+                    permute_final_cmt_weights(
+                        global_group_raw_weights,
+                        global_group_weights,
+                        experiment_seed=int(
+                            config.get("experiment", {}).get("seed", 42)
+                        ),
+                        optimizer_step=current_optimizer_step,
+                    )
+                )
+                control_metrics.update(permutation_metrics)
+            allocation_metrics.update(control_metrics)
             ppo_raw_weights = torch.zeros_like(
                 gibbs_scores.index_select(0, indices), dtype=torch.float32
             )
@@ -2313,6 +2363,10 @@ def _opd_train_step(
                 "allocation_solver_status",
             )
         }
+        if use_groupwise_gibbs:
+            metric["allocation_group"].update(
+                {key: metric[key] for key in CONTROL_FIELDS}
+            )
         cuda_sync(device)
         metric["optimizer_step_wall_time_sec"] = time.perf_counter() - minibatch_started
         minibatch_metrics.append(metric)
@@ -3321,6 +3375,11 @@ def _run_grpo_training(
 def run_training(
     config: dict[str, Any], command_line: list[str] | None = None
 ) -> dict[str, Any]:
+    random_weight_control = random_weight_control_enabled(config)
+    if random_weight_control and config["experiment"]["method"] != "cmt":
+        raise ValueError(
+            "selector.cmt_random_weight_control is a CMT-only training ablation"
+        )
     if config.get("alfworld", {}).get("enabled", False):
         from .alfworld_protocol import resolve_protocol
 
@@ -3726,6 +3785,11 @@ def run_training(
                 "weight_max": cmt_weight_max,
                 "final_kl_budget": cmt_final_allocation_kl,
                 "normalization_scope": "global_valid_tokens_within_each_ppo_group",
+                "random_weight_control": random_weight_control,
+                "weight_assignment": "random_permuted_final_weights"
+                if random_weight_control
+                else "score_aligned_cmt",
+                "permutation_rng": "independent CPU torch.Generator, SHA256(experiment_seed,global_optimizer_step), v1",
             }
             metadata["cmt_correction"] = {
                 "mode": cmt_correction_mode,
@@ -4899,6 +4963,7 @@ def run_training(
                 allocation_mode=cmt_allocation_mode,
                 allocation_kl_epsilon=float(selector_cfg.get("cmt_allocation_kl", 0.5)),
                 allocation_count=int(train_metrics["gibbs_allocations"]),
+                cmt_random_weight_control=random_weight_control,
             )
             primary = SelectorOutput(local_cmt_weights, cmt_diagnostics)
             token_allocation = local_cmt_weights
@@ -5155,6 +5220,9 @@ def run_training(
                 ppo_mini_batch_size if method == "cmt" else None
             ),
             "cmt_allocation_mode": cmt_allocation_mode if method == "cmt" else None,
+            "cmt_random_weight_control": random_weight_control
+            if method == "cmt"
+            else False,
             "cmt_weight_min": cmt_weight_min if method == "cmt" else None,
             "cmt_weight_max": cmt_weight_max if method == "cmt" else None,
             "cmt_correction_mode": cmt_correction_mode if method == "cmt" else None,
@@ -5177,7 +5245,9 @@ def run_training(
                 "ta": "hard_global_top_rho",
                 "rac": "bellman_soft_all_valid_response_tokens",
                 "pgt": "hard_global_top_rho_projected_gradient_gain",
-                "cmt": "kl_constrained_per_ppo_group_coupled_marginal_teachability",
+                "cmt": "random_permuted_final_cmt_weights_per_ppo_group"
+                if random_weight_control
+                else "kl_constrained_per_ppo_group_coupled_marginal_teachability",
                 "iw": "official_prefix_remaining_discrepancy_advantage_weight",
             }[method],
             "objective_normalization": "global_weighted_token_mean",
@@ -5496,6 +5566,7 @@ def run_training(
                 }
             )
             if method == "cmt":
+                event.update({key: minibatch_metric[key] for key in CONTROL_FIELDS})
                 for scope_key in (
                     "allocation_id",
                     "rollout_id",
@@ -5583,6 +5654,9 @@ def run_training(
     summary = {
         "status": "ok",
         "method": method,
+        "cmt_random_weight_control": random_weight_control
+        if method == "cmt"
+        else False,
         "steps": max_steps,
         "epochs": training.get("epochs"),
         "dataset_rows": len(records),

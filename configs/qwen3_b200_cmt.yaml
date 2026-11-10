@@ -29,6 +29,8 @@ training_evaluation:
   interval_steps: 150
 
 selector:
+  # Training ablation only: permute final global PPO-group weights, not scores.
+  cmt_random_weight_control: false
   joint_cross_scoring: true
   pgt_vocab_chunk_tokens: 2048
   # Information budget for max_w <w,L> s.t. KL(w || uniform) <= epsilon.
