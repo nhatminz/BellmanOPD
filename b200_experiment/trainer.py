@@ -141,6 +141,13 @@ from .cmt_random_control import (
     permute_final_cmt_weights,
     random_weight_control_enabled,
 )
+from .paired_weight_diagnostics import (
+    PAIRED_FIELDS,
+    PairedWeightDiagnosticsLogger,
+    flatten_paired,
+    measure_paired_weights,
+    paired_diagnostics_enabled,
+)
 from .selectors.base import SelectorOutput, robust_quantile_normalize, scatter_valid
 from .tensorboard_logging import TensorBoardLogger
 from .vllm_evaluation import (
@@ -823,6 +830,11 @@ def _append_train_metrics_csv(path: Path, metrics: dict[str, Any]) -> None:
         "max_token_probability",
         "allocation_solver_status",
         *CONTROL_FIELDS,
+        *(
+            PAIRED_FIELDS
+            if metrics.get("paired_weight_diagnostics_enabled", False)
+            else ()
+        ),
     )
     statistics = tuple(
         f"{score}_{statistic}"
@@ -875,7 +887,27 @@ def _append_train_metrics_csv(path: Path, metrics: dict[str, Any]) -> None:
             "q95",
         )
     )
-    _append_csv_row(path, row, common + statistics)
+    fieldnames = common + statistics
+    if path.is_file() and path.stat().st_size:
+        with path.open(newline="", encoding="utf-8") as handle:
+            existing = tuple(next(csv.reader(handle), ()))
+        # Diagnostic flags may change on resume without changing the experiment.
+        # Preserve old column order/data; add paired columns once if needed, and
+        # keep them blank when subsequent steps disable the diagnostic flag.
+        if set(existing).symmetric_difference(fieldnames) <= set(PAIRED_FIELDS):
+            merged = existing + tuple(
+                name for name in fieldnames if name not in existing
+            )
+            if len(merged) > len(existing):
+                temporary = path.with_suffix(path.suffix + ".paired.tmp")
+                with path.open(newline="", encoding="utf-8") as source:
+                    with temporary.open("w", newline="", encoding="utf-8") as target:
+                        writer = csv.DictWriter(target, fieldnames=merged)
+                        writer.writeheader()
+                        writer.writerows(csv.DictReader(source))
+                temporary.replace(path)
+            fieldnames = merged
+    _append_csv_row(path, row, fieldnames)
 
 
 def _save_inference_snapshot(
@@ -1799,6 +1831,10 @@ def _opd_train_step(
     max_optimizer_steps: int | None = None,
     optimizer_step_start: int = 0,
     on_optimizer_step: Callable[[int, dict[str, float]], None] | None = None,
+    paired_local_gain: torch.Tensor | None = None,
+    paired_sequential_gain_raw: torch.Tensor | None = None,
+    paired_coverage_correction: torch.Tensor | None = None,
+    on_paired_weight_diagnostics: Callable | None = None,
 ):
     training = config["training"]
     local_batch_size = rollout.input_ids.shape[0]
@@ -1858,6 +1894,24 @@ def _opd_train_step(
         raise ValueError("gibbs_scores and gibbs_epsilon must be provided together")
     use_groupwise_gibbs = gibbs_scores is not None
     random_weight_control = random_weight_control_enabled(config)
+    paired_enabled = paired_diagnostics_enabled(config)
+    if paired_enabled and (not random_weight_control or not use_groupwise_gibbs):
+        raise ValueError(
+            "Paired PROW/G-only diagnostics require random-weight CMT training"
+        )
+    if paired_enabled and distributed.any(
+        any(
+            value is None or value.shape != objective_valid.shape
+            for value in (
+                paired_local_gain,
+                paired_sequential_gain_raw,
+                paired_coverage_correction,
+            )
+        )
+    ):
+        raise ValueError(
+            "Paired gain/sequential_gain_raw/coverage_correction must align with objective-valid token positions on every rank"
+        )
     if random_weight_control and not use_groupwise_gibbs:
         raise ValueError(
             "cmt_random_weight_control requires CMT's groupwise allocation"
@@ -2013,6 +2067,7 @@ def _opd_train_step(
             "allocation_maximum_feasible_kl": float("nan"),
         }
         allocation_started = time.perf_counter()
+        paired_report = paired_payload = None
         if use_groupwise_gibbs:
             # The allocation domain is exactly this optimizer update's valid
             # token set.  It is neither the full rollout nor an individual
@@ -2038,6 +2093,9 @@ def _opd_train_step(
                 weight_min=gibbs_weight_min,
                 weight_max=gibbs_weight_max,
                 final_epsilon=gibbs_final_epsilon,
+            )
+            prow_diagnostic_weights = (
+                global_group_weights.detach() if paired_enabled else None
             )
             # Controlled ablation: reassign ONLY final allocation weights on
             # this globally gathered optimizer group's valid-token domain.
@@ -2078,6 +2136,62 @@ def _opd_train_step(
                 )
                 control_metrics.update(permutation_metrics)
             allocation_metrics.update(control_metrics)
+            if paired_enabled:
+                paired_started = time.perf_counter()
+                with torch.no_grad():
+                    local_paired = torch.stack(
+                        [
+                            value.detach().index_select(0, indices)[ppo_valid]
+                            for value in (
+                                paired_local_gain,
+                                paired_sequential_gain_raw,
+                                paired_coverage_correction,
+                            )
+                        ],
+                        dim=-1,
+                    ).reshape(-1)
+                    global_paired, paired_start, paired_end, paired_lengths = (
+                        distributed.all_gather_variable_1d(local_paired)
+                    )
+                    if (paired_start, paired_end) != (
+                        3 * group_start,
+                        3 * group_end,
+                    ) or tuple(paired_lengths) != tuple(3 * n for n in _group_lengths):
+                        raise AssertionError(
+                            "Paired global token ordering differs from the PROW allocation domain"
+                        )
+                    gain, d_raw, coverage = global_paired.reshape(-1, 3).unbind(-1)
+                    _, g_only_weights, _, g_only_metrics = cmt_allocation(
+                        gain,
+                        float(gibbs_epsilon),
+                        mode=gibbs_mode,
+                        weight_min=gibbs_weight_min,
+                        weight_max=gibbs_weight_max,
+                        final_epsilon=gibbs_final_epsilon,
+                    )
+                    paired_report, paired_payload = measure_paired_weights(
+                        gain,
+                        d_raw,
+                        coverage,
+                        prow_diagnostic_weights,
+                        g_only_weights,
+                        global_group_weights,
+                        weight_min=gibbs_weight_min,
+                        weight_max=gibbs_weight_max,
+                        allocation_mode=gibbs_mode,
+                    )
+                    paired_report.update(
+                        allocation_kl_target=float(
+                            allocation_metrics["allocation_kl_target"]
+                        ),
+                        prow_solver_kl=float(allocation_metrics["allocation_kl_final"]),
+                        g_only_solver_kl=float(g_only_metrics["allocation_kl_final"]),
+                    )
+                allocation_metrics.update(flatten_paired(paired_report))
+                allocation_metrics["paired_weight_diagnostics_time_sec"] = (
+                    time.perf_counter() - paired_started
+                )
+                allocation_metrics["paired_weight_diagnostics"] = paired_report
             ppo_raw_weights = torch.zeros_like(
                 gibbs_scores.index_select(0, indices), dtype=torch.float32
             )
@@ -2369,6 +2483,19 @@ def _opd_train_step(
             )
         cuda_sync(device)
         metric["optimizer_step_wall_time_sec"] = time.perf_counter() - minibatch_started
+        if (
+            paired_enabled
+            and distributed.is_main
+            and on_paired_weight_diagnostics is not None
+        ):
+            on_paired_weight_diagnostics(
+                global_optimizer_step,
+                paired_report,
+                paired_payload,
+                allocation_id=allocation_id,
+                rollout_id=rollout_id,
+                ppo_group_index=ppo_index,
+            )
         minibatch_metrics.append(metric)
         if on_optimizer_step is not None:
             on_optimizer_step(global_optimizer_step, metric)
@@ -3376,6 +3503,19 @@ def run_training(
     config: dict[str, Any], command_line: list[str] | None = None
 ) -> dict[str, Any]:
     random_weight_control = random_weight_control_enabled(config)
+    paired_enabled = paired_diagnostics_enabled(config)
+    if paired_enabled and (
+        not random_weight_control or config["experiment"]["method"] != "cmt"
+    ):
+        raise ValueError(
+            "Paired PROW/G-only diagnostics require random-weight CMT training"
+        )
+    if paired_enabled and config.get("selector", {}).get(
+        "cmt_ablation_arm", "canonical"
+    ) not in {"canonical", "g_d"}:
+        raise ValueError(
+            "Paired PROW/G-only diagnostics require the canonical PROW score"
+        )
     if random_weight_control and config["experiment"]["method"] != "cmt":
         raise ValueError(
             "selector.cmt_random_weight_control is a CMT-only training ablation"
@@ -3786,6 +3926,7 @@ def run_training(
                 "final_kl_budget": cmt_final_allocation_kl,
                 "normalization_scope": "global_valid_tokens_within_each_ppo_group",
                 "random_weight_control": random_weight_control,
+                "paired_weight_diagnostics": paired_enabled,
                 "weight_assignment": "random_permuted_final_weights"
                 if random_weight_control
                 else "score_aligned_cmt",
@@ -3960,6 +4101,11 @@ def run_training(
         config,
         distributed.world_size,
         resume_step=resume_step if resume_state is not None else None,
+    )
+    paired_logger = PairedWeightDiagnosticsLogger(
+        output_dir,
+        enabled=paired_enabled and distributed.is_main,
+        resume_step=resume_step,
     )
     training_eval_settings = config.get("training_evaluation", {})
     evaluation_steps = training_evaluation_steps(max_steps, training_eval_settings)
@@ -4871,6 +5017,16 @@ def run_training(
             max_optimizer_steps=max_steps - optimizer_step,
             optimizer_step_start=optimizer_step,
             on_optimizer_step=after_optimizer_step,
+            paired_local_gain=primary.diagnostics["gain"] if paired_enabled else None,
+            paired_sequential_gain_raw=primary.diagnostics["sequential_gain_raw"]
+            if paired_enabled
+            else None,
+            paired_coverage_correction=primary.diagnostics["coverage_correction"]
+            if paired_enabled
+            else None,
+            on_paired_weight_diagnostics=paired_logger.write
+            if paired_enabled
+            else None,
         )
         if method == "cmt":
             local_cmt_weights = train_metrics.pop("allocated_position_weights")
@@ -5567,6 +5723,11 @@ def run_training(
             )
             if method == "cmt":
                 event.update({key: minibatch_metric[key] for key in CONTROL_FIELDS})
+                if paired_enabled:
+                    event.update({key: minibatch_metric[key] for key in PAIRED_FIELDS})
+                    event["paired_weight_diagnostics"] = copy.deepcopy(
+                        minibatch_metric["paired_weight_diagnostics"]
+                    )
                 for scope_key in (
                     "allocation_id",
                     "rollout_id",
@@ -5647,6 +5808,7 @@ def run_training(
         if ppo_minibatch_offset >= rollout_ppo_minibatches:
             rollout_index += 1
             ppo_minibatch_offset = 0
+    paired_logger.finalize()
     tensorboard_logger.close()
     if rollout_engine is not None:
         rollout_engine.close()
@@ -5657,6 +5819,12 @@ def run_training(
         "cmt_random_weight_control": random_weight_control
         if method == "cmt"
         else False,
+        "paired_weight_diagnostics": {
+            "json": str((output_dir / "rebuttal_weight_diagnostics.json").resolve()),
+            "csv": str((output_dir / "rebuttal_weight_diagnostics.csv").resolve()),
+        }
+        if paired_enabled
+        else None,
         "steps": max_steps,
         "epochs": training.get("epochs"),
         "dataset_rows": len(records),

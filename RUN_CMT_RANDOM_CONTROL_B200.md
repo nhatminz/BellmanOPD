@@ -9,6 +9,10 @@ KL budget, and normalization". Bật bằng CLI hiện có:
 
 Mặc định `false`; tên method vẫn là `cmt`. Không thay theoretical CMT scoring.
 
+Tùy chọn paired PROW-vs-G-only diagnostics trong random run:
+`CMT_PAIRED_WEIGHT_DIAGNOSTICS=true`. Lệnh chạy 1 GPU, output và cách lấy số
+cho rebuttal: [`RUN_CMT_PAIRED_WEIGHT_DIAGNOSTICS.md`](RUN_CMT_PAIRED_WEIGHT_DIAGNOSTICS.md).
+
 ## Control được áp dụng ở đâu
 
 Trong `trainer._opd_train_step`, mỗi global PPO optimizer group thực hiện:

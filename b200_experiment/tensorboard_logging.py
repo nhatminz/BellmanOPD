@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 from .training_cost import COST_TAGS
 from .cmt_random_control import CONTROL_NUMERIC_FIELDS
+from .paired_weight_diagnostics import PAIRED_FIELDS
 
 
 BASE_TAGS = {
@@ -114,6 +115,10 @@ CMT_TAGS = {
 CMT_CONTROL_TAGS = {
     f"cmt/random_control/{field.removeprefix('cmt_')}": field
     for field in CONTROL_NUMERIC_FIELDS
+}
+PAIRED_TAGS = {
+    f"cmt/paired_weights/{field.removeprefix('paired_')}": field
+    for field in PAIRED_FIELDS
 }
 
 CMT_ALLOCATION_TAGS = {
@@ -240,7 +245,11 @@ def production_tensorboard_metrics(
         selected.update(
             {
                 tag: float(metrics[field])
-                for tag, field in {**CMT_ALLOCATION_TAGS, **CMT_CONTROL_TAGS}.items()
+                for tag, field in {
+                    **CMT_ALLOCATION_TAGS,
+                    **CMT_CONTROL_TAGS,
+                    **PAIRED_TAGS,
+                }.items()
                 if field in metrics and metrics[field] is not None
             }
         )

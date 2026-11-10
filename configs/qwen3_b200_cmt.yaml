@@ -31,6 +31,8 @@ training_evaluation:
 selector:
   # Training ablation only: permute final global PPO-group weights, not scores.
   cmt_random_weight_control: false
+  # Detached PROW/G-only comparisons on random-trained on-policy trajectories.
+  cmt_paired_weight_diagnostics: false
   joint_cross_scoring: true
   pgt_vocab_chunk_tokens: 2048
   # Information budget for max_w <w,L> s.t. KL(w || uniform) <= epsilon.

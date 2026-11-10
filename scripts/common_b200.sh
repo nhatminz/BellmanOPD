@@ -413,6 +413,7 @@ build_training_args() {
     --set "selector.cmt_correction_quantile=${CMT_CORRECTION_QUANTILE:-0.99}"
     --set "selector.cmt_final_allocation_kl=${CMT_FINAL_ALLOCATION_KL:-0.02}"
     --set "selector.cmt_random_weight_control=${CMT_RANDOM_WEIGHT_CONTROL:-false}"
+    --set "selector.cmt_paired_weight_diagnostics=${CMT_PAIRED_WEIGHT_DIAGNOSTICS:-false}"
     --set "selector.cmt_gamma=${CMT_GAMMA:-1.0}"
     --set "selector.cmt_successor_lambda=${CMT_SUCCESSOR_LAMBDA:-1.0}"
     --set "selector.cmt_full_vocab_diagnostics=${CMT_FULL_VOCAB_DIAGNOSTICS:-false}"

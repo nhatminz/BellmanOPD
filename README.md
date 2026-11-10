@@ -7,6 +7,10 @@ Launcher `scripts/train_cmt_random_control_compe_math_4b_17b_1epoch.sh both`
 chạy original/control cùng Qwen3-4B → Qwen3-1.7B, Competition-MATH một epoch,
 tắt eval khi train rồi eval checkpoint cuối seed 42/43/44 với avg@8/pass@8 ±.
 
+Paired PROW-vs-G-only diagnostics trên random-trained student, kèm lệnh 1 GPU
+và tự tổng hợp số cho rebuttal:
+[`RUN_CMT_PAIRED_WEIGHT_DIAGNOSTICS.md`](RUN_CMT_PAIRED_WEIGHT_DIAGNOSTICS.md).
+
 Train/eval ALFWorld multi-turn thật với CMT/OPD/TA/IW, teacher Qwen3-4B và student
 Qwen3-1.7B: [`ALFWORLD_MULTITURN.md`](ALFWORLD_MULTITURN.md).
 Protocol v2 sửa parser/action menu, giữ observation sau lỗi và chuẩn hóa PPO;
