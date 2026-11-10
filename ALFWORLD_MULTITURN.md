@@ -5,6 +5,11 @@ Protocol v2 sửa giao thức gây `look;`/parser failure và lỗi chuẩn hóa
 Code không cam kết checkpoint sau train sẽ có success rate cao: protocol đúng và
 năng lực giải task của student/teacher là hai điều phải kiểm tra riêng.
 
+Nếu CMT dừng ở `stage=start-rollout-vllm` với timeout, xem phần
+[timeout khởi động vLLM và lệnh chạy lại hai GPU](ALFWORLD_FIX_CMT_RUNTIME.md#timeout-vllm-khi-khởi-động-cmt-ngày-09112026).
+Launcher ALFWorld hiện chờ health tối đa 1800 giây và ghi log INFO cùng
+`vllm_rollout_server.rank-XXXXX.startup.json` để theo dõi startup.
+
 ## 1. Các thay đổi hành vi
 
 - System prompt liệt kê từng ví dụ trên một dòng, không còn ví dụ `look;`.

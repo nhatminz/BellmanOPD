@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import math
 import os
 import signal
 import shutil
@@ -207,10 +208,21 @@ class VLLMRolloutEngine:
 
     def _server_environment(self) -> dict[str, str]:
         environment = isolate_distributed_subprocess_environment()
+        # These are launcher controls consumed by common_b200.sh, not vLLM
+        # environment variables. Keep real vLLM settings, but do not leak our
+        # own names into its unknown-environment-variable validation.
+        for name in list(environment):
+            if (
+                name.startswith("VLLM_LOGPROB_SANITY_")
+                or name == "VLLM_RETURN_LOG_PROBS"
+            ):
+                environment.pop(name)
         environment["VLLM_SERVER_DEV_MODE"] = "1"
         environment["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
-        environment["VLLM_LOGGING_LEVEL"] = environment.get(
-            "VLLM_LOGGING_LEVEL", "WARNING"
+        environment["VLLM_LOGGING_LEVEL"] = str(
+            self.settings.get("logging_level")
+            or environment.get("ROLLOUT_VLLM_LOGGING_LEVEL")
+            or environment.get("VLLM_LOGGING_LEVEL", "WARNING")
         )
         # torchrun workers see every listed GPU. Restrict this child to the
         # worker's matching physical device so each rank owns one colocated
@@ -227,11 +239,36 @@ class VLLMRolloutEngine:
             environment["CUDA_VISIBLE_DEVICES"] = str(self.local_rank)
         return environment
 
+    @staticmethod
+    def _write_startup_report(log_path: Path, report: dict[str, Any]) -> None:
+        destination = log_path.with_suffix(".startup.json")
+        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
+                + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(destination)
+        except OSError:
+            # A diagnostic write must not obscure a server/HTTP failure.
+            pass
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def start(self) -> None:
         if self.closed:
             raise RuntimeError("Cannot restart a closed vLLM rollout engine")
         if self.process is not None:
             return
+        timeout = float(self.settings.get("startup_timeout", 600))
+        log_interval = float(self.settings.get("startup_log_interval", 30))
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("rollout.vllm.startup_timeout must be finite and positive")
+        if not math.isfinite(log_interval) or log_interval <= 0:
+            raise ValueError(
+                "rollout.vllm.startup_log_interval must be finite and positive"
+            )
         self.output_dir.mkdir(parents=True, exist_ok=True)
         log_name = (
             f"vllm_rollout_server.rank-{self.local_rank:05d}.log"
@@ -240,10 +277,35 @@ class VLLMRolloutEngine:
         )
         log_path = self.output_dir / log_name
         self.log_handle = log_path.open("a", encoding="utf-8")
-        environment = self._server_environment()
+        started = time.monotonic()
+        report = {
+            "rank": self.local_rank,
+            "world_size": self.world_size,
+            "model": str(self.model_path),
+            "log": str(log_path.resolve()),
+            "url": self.base_url,
+            "timeout_sec": timeout,
+            "last_health": "not checked",
+            "status": "launching",
+        }
         try:
+            environment = self._server_environment()
+            command = self._server_command()
+            report.update(
+                command=command,
+                gpu=environment["CUDA_VISIBLE_DEVICES"],
+                logging_level=environment["VLLM_LOGGING_LEVEL"],
+            )
+            self.log_handle.write(
+                "\nRollout server launch: " + json.dumps(report) + "\n"
+            )
+            self.log_handle.flush()
+            tqdm.write(
+                f"vLLM rollout rank {self.local_rank}: starting on GPU {report['gpu']}; "
+                f"health timeout={timeout:g}s; log={log_path}",
+            )
             self.process = subprocess.Popen(
-                self._server_command(),
+                command,
                 cwd=Path(__file__).resolve().parents[1],
                 env=environment,
                 stdout=self.log_handle,
@@ -251,35 +313,77 @@ class VLLMRolloutEngine:
                 text=True,
                 start_new_session=True,
             )
-            deadline = time.monotonic() + float(
-                self.settings.get("startup_timeout", 600)
-            )
+            report.update(pid=self.process.pid, status="waiting-for-health")
+            self._write_startup_report(log_path, report)
+            deadline = started + timeout
+            next_log = started + log_interval
             while time.monotonic() < deadline:
                 if self.process.poll() is not None:
                     self._raise_server_failure(log_path)
                 try:
-                    response = requests.get(f"{self.base_url}/health", timeout=2)
+                    response = requests.get(
+                        f"{self.base_url}/health",
+                        timeout=min(2.0, max(0.1, deadline - time.monotonic())),
+                    )
+                    report["last_health"] = f"HTTP {response.status_code}"
                     if response.ok:
                         break
-                except requests.RequestException:
-                    pass
+                except requests.RequestException as error:
+                    report["last_health"] = (
+                        f"{type(error).__name__}: {str(error)[:200]}"
+                    )
+                now = time.monotonic()
+                if now >= next_log:
+                    report["elapsed_sec"] = now - started
+                    self._write_startup_report(log_path, report)
+                    tqdm.write(
+                        f"vLLM rollout rank {self.local_rank}: still starting "
+                        f"({now - started:.0f}/{timeout:g}s), pid={self.process.pid}, "
+                        f"health={report['last_health']}; see {log_path}"
+                    )
+                    next_log = now + log_interval
                 time.sleep(0.5)
             else:
                 tail = self._server_log_tail(log_path)
                 raise TimeoutError(
-                    "vLLM rollout server did not become ready; "
-                    f"see {log_path}\nLast server log lines:\n{tail}"
+                    f"vLLM rollout rank {self.local_rank} did not become ready "
+                    f"within {timeout:g}s (GPU {report['gpu']}, "
+                    f"last health: {report['last_health']}); see {log_path}. "
+                    "Inspect the INFO server log to identify the slow/failing stage. "
+                    "For a slow cold start, increase ROLLOUT_VLLM_STARTUP_TIMEOUT "
+                    "or rollout.vllm.startup_timeout.\n"
+                    f"Last server log lines:\n{tail}"
                 )
+            report.update(
+                status="initializing-weight-transfer",
+                elapsed_sec=time.monotonic() - started,
+            )
+            self._write_startup_report(log_path, report)
             self._post("/init_weight_transfer_engine", json={"init_info": {}})
             # Discard dummy weights and KV cache before loading the two HF models.
+            report["status"] = "sleeping-dummy-engine"
+            self._write_startup_report(log_path, report)
             self._sleep()
-        except BaseException:
+            report.update(status="ready", elapsed_sec=time.monotonic() - started)
+            self._write_startup_report(log_path, report)
+            tqdm.write(
+                f"vLLM rollout rank {self.local_rank}: ready in {report['elapsed_sec']:.1f}s"
+            )
+        except BaseException as error:
+            report.update(
+                status="failed",
+                error=f"{type(error).__name__}: {error}",
+                elapsed_sec=time.monotonic() - started,
+            )
+            self._write_startup_report(log_path, report)
             self.close()
             raise
 
     def _raise_server_failure(self, log_path: Path) -> None:
         raise RuntimeError(
-            "vLLM rollout server exited:\n" + self._server_log_tail(log_path)
+            f"vLLM rollout rank {self.local_rank} exited "
+            f"(exit={self.process.returncode if self.process is not None else 'unknown'}); "
+            f"see {log_path}:\n" + self._server_log_tail(log_path)
         )
 
     def _server_log_tail(self, log_path: Path, lines: int = 40) -> str:
@@ -612,7 +716,10 @@ class VLLMRolloutEngine:
             return
         self.closed = True
         if self.process is not None:
-            if self.process.poll() is None:
+            try:
+                # The API launcher can exit before its EngineCore/worker
+                # descendants. Signal our own dedicated process group even
+                # when Popen.poll() already reports an exited launcher.
                 try:
                     os.killpg(self.process.pid, signal.SIGTERM)
                 except ProcessLookupError:
@@ -620,10 +727,14 @@ class VLLMRolloutEngine:
                 try:
                     self.process.wait(timeout=20)
                 except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(self.process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    self.process.wait(timeout=10)
+                    pass
+            finally:
+                # Reap remaining workers too, before another sequential run
+                # starts an engine on the same GPU. Never target other groups.
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.process.wait(timeout=10)
         if self.log_handle is not None:
             self.log_handle.close()

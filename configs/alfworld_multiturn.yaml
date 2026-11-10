@@ -50,6 +50,9 @@ rollout:
     max_model_len: 8192
     max_num_seqs: 8
     max_concurrent_requests: 8
+    startup_timeout: 1800
+    startup_log_interval: 30
+    logging_level: INFO
     logprob_sanity:
       enabled: false
       max_tokens_per_rank: 32

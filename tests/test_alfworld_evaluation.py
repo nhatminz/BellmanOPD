@@ -298,6 +298,8 @@ def test_four_launchers_share_workload_and_resolve_b200_paths(tmp_path, large_pa
                 == "/workspace/storage-shared/models/Qwen3-4B"
             )
         assert config["rollout"]["num_responses"] == 4
+        assert config["rollout"]["vllm"]["startup_timeout"] == 1800
+        assert config["rollout"]["vllm"]["logging_level"] == "INFO"
         assert config["alfworld"]["max_turns"] == 30
         assert config["training"]["max_steps"] == 1000
         assert not config["training_evaluation"]["enabled"]

@@ -457,6 +457,12 @@ build_training_args() {
     --set "training_evaluation.vllm.performance_mode=${VLLM_PERFORMANCE_MODE:-throughput}"
     --set "training_evaluation.vllm.async_scheduling=${VLLM_ASYNC_SCHEDULING:-true}"
   )
+  if [[ -n "${ROLLOUT_VLLM_STARTUP_TIMEOUT:-}" ]]; then
+    COMMON_TRAIN_ARGS+=(--set "rollout.vllm.startup_timeout=${ROLLOUT_VLLM_STARTUP_TIMEOUT}")
+  fi
+  if [[ -n "${ROLLOUT_VLLM_LOGGING_LEVEL:-}" ]]; then
+    COMMON_TRAIN_ARGS+=(--set "rollout.vllm.logging_level=${ROLLOUT_VLLM_LOGGING_LEVEL}")
+  fi
   if [[ "${B200_METHOD:-}" == "iw" ]]; then
     COMMON_TRAIN_ARGS+=(
       --set "iw_opd.enabled=${IW_OPD_ENABLED:-true}"

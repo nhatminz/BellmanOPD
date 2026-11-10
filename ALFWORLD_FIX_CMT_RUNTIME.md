@@ -1,5 +1,68 @@
 # Sửa CMT PPO partition và lỗi GLIBCXX khi chạy ALFWorld
 
+## Timeout vLLM khi khởi động CMT ngày 09/11/2026
+
+Run `alfworld_v2_cmt_20261109_175814_891588417/cmt_opd` dừng trong
+`VLLMRolloutEngine.start()`: `/health` chưa ready trong timeout 600 giây.
+Đây là giai đoạn trước khi tải HF teacher/student, scoring và optimizer update.
+Lệnh khởi tạo server giống nhau cho OPD/TA/CMT/IW khi cùng cấu hình rollout;
+việc OPD/TA trước đó chạy được không chứng minh lỗi nằm trong CMT objective.
+
+Log được gửi chỉ có vài WARNING. Không đủ bằng chứng để kết luận vì sao engine
+chậm/kẹt bên trong, ví dụ import/CUDA initialization hay bước khác. Không coi
+`Unknown vLLM environment variable ... VLLM_LOGPROB_SANITY_FAIL` là fatal error.
+
+Bản sửa:
+
+- ALFWorld tăng health startup timeout từ 600 lên 1800 giây, có thể chỉnh
+  `ROLLOUT_VLLM_STARTUP_TIMEOUT`. Math/Gemma giữ timeout YAML hiện có khi không
+  đặt biến này. Cả launcher 4B/1.7B và 14B/4B đều hỗ trợ.
+- ALFWorld dùng INFO server log, chỉnh bằng `ROLLOUT_VLLM_LOGGING_LEVEL`.
+  In tiến độ khởi động mỗi 30 giây, lưu GPU/PID/timeout/HTTP state và giai đoạn
+  vào `vllm_rollout_server.rank-00000.startup.json` (tương tự rank 1) ngay cạnh
+  file `.log`, checkpoint/eval/training metrics.
+- Loại các biến diagnostic riêng `VLLM_LOGPROB_SANITY_*` và
+  `VLLM_RETURN_LOG_PROBS` khỏi môi trường server, sau khi launcher đã đọc chúng.
+  Diagnostic trong trainer vẫn giữ nguyên giá trị.
+- Khi đóng server, dọn đúng process group riêng của run kể cả API launcher đã
+  thoát nhưng EngineCore/worker còn sống; giúp run nối tiếp nhận lại GPU.
+
+Theo [hướng dẫn vLLM](https://docs.vllm.ai/en/v0.17.1/usage/troubleshooting/#enable-more-logging),
+có thể dùng DEBUG để tìm bước bị kẹt. Bản sửa bổ sung khả năng quan sát và đủ
+thời gian cho cold start; không tuyên bố tăng timeout sẽ sửa được mọi deadlock.
+
+Sau khi cập nhật code, chạy riêng CMT mới trên **hai GPU đang rảnh**. Nếu IW
+trong log vẫn chạy trên GPU 0,1, chờ IW hoàn tất trước khi dùng hai GPU đó:
+
+```bash
+export STORAGE_ROOT=/workspace/storage-shared
+cd "$STORAGE_ROOT/nlp/minhpn19/BellmanOPD_analysis"
+unset RUN_NAME OUTPUT_DIR RESUME RESUME_FROM_CHECKPOINT
+
+CUDA_VISIBLE_DEVICES=0,1 TRAIN_NPROC_PER_NODE=2 \
+TEACHER_MODEL=models/Qwen3-4B STUDENT_MODEL=models/Qwen3-1.7B \
+BATCH_SIZE=8 GLOBAL_BATCH_SIZE=8 NUM_RESPONSES=4 PPO_MINI_BATCH_SIZE=8 \
+MICRO_BATCH_SIZE_PER_GPU=1 SCORE_MICRO_BATCH_SIZE=1 \
+SEED=42 ROLLOUT_SEED=42 MAX_STEPS=1000 NUM_EPOCHS=1 LR=5.0e-6 SAVE_INTERVAL=50 \
+ROLLOUT_VLLM_STARTUP_TIMEOUT=1800 ROLLOUT_VLLM_LOGGING_LEVEL=INFO \
+bash scripts/train_alfworld_multiturn.sh cmt
+```
+
+Tên run tự sinh theo timestamp. Run lỗi chưa train step nào nên không có
+optimizer/checkpoint để resume từ lần đó. Objective, batch, rollout token budget,
+PPO/CMT allocation và learning rate không thay đổi bởi bản sửa startup này.
+
+Nếu vẫn timeout, lấy log INFO trong **run mới** (đường dẫn được in ngay lúc start)
+và file `.startup.json`. Có thể đặt `ROLLOUT_VLLM_LOGGING_LEVEL=DEBUG` cho lần
+chẩn đoán kế tiếp. Khi gửi log, giữ cả các dòng trước traceback; chúng cho biết
+engine kẹt ở bước nào. Không cần cài lại venv hay sửa checkpoint để áp dụng patch.
+
+Kiểm thử bổ sung trong `tests/test_vllm_rollout_startup.py`: fake cold start
+700 giây vượt budget cũ, timeout/HTTP state, early server exit, process-group
+cleanup, mapping timeout qua launcher và workload giống nhau giữa bốn method.
+Có thêm test HTTP server/process group thật trên CPU; không coi đó là xác nhận
+vLLM/CUDA IPC hoạt động trên B200.
+
 ## Hai nguyên nhân khác nhau trong log
 
 Log trên `general-embedding-training-0-0` dừng ở `stage=train`: CMT sắp trajectory
