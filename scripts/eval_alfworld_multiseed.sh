@@ -14,6 +14,9 @@ CHECKPOINTS=(
 SEEDS=(42 43 44)
 EPISODES_PER_TASK="${EPISODES_PER_TASK:-8}"
 EVAL_TAG="${EVAL_TAG:-alfworld_avg8_pass8_$(date +%Y%m%d_%H%M%S_%N)}"
+# Optional old tag: reuse completed/validated seeds and only generate missing ones.
+# EVAL_TAG must be NEW. Leave REUSE_TAG empty for entirely fresh episodes.
+REUSE_TAG="${REUSE_TAG:-}"
 # ==============================================================
 
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
@@ -24,14 +27,18 @@ cd "${REPO_DIR}"
 # Keep historical --run-output/--checkpoints commands (one episode by default).
 for arg in "$@"; do
   case "${arg}" in
-    --run-output|--run-output=*|--worker)
+    --run-output|--run-output=*|--worker|--audit-seed|--audit-seed=*)
       exec "${PYTHON_BIN:-python3}" -m b200_experiment.alfworld_evaluation "$@"
       ;;
   esac
 done
 printf 'ALFWorld eval: tag=%s, GPUs=%s, seeds=%s, episodes/task/seed=%s\n' \
   "${EVAL_TAG}" "${CUDA_VISIBLE_DEVICES}" "${SEEDS[*]}" "${EPISODES_PER_TASK}"
+REUSE_ARGS=()
+if [[ -n "${REUSE_TAG}" ]]; then
+  REUSE_ARGS=(--reuse-tag "${REUSE_TAG}")
+fi
 exec "${PYTHON_BIN:-python3}" -m b200_experiment.alfworld_evaluation \
   --checkpoint-paths "${CHECKPOINTS[@]}" \
   --seeds "${SEEDS[@]}" --gpus "${CUDA_VISIBLE_DEVICES}" \
-  --episodes-per-task "${EPISODES_PER_TASK}" --tag "${EVAL_TAG}" "$@"
+  --episodes-per-task "${EPISODES_PER_TASK}" --tag "${EVAL_TAG}" "${REUSE_ARGS[@]}" "$@"

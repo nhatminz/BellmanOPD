@@ -1,5 +1,8 @@
 # ALFWorld multi-turn protocol v2 trên B200
 
+Eval đạt 100% rồi `JSONDecodeError: Unterminated string`, hoặc cần khôi phục
+seed đã chạy và chẩn đoán zero success: xem [JSONL recovery/audit](ALFWORLD_EVAL_JSONL_RECOVERY.md).
+
 Eval dừng ở `Incomplete ALFWorld worker` / `extra_special_tokens` list gây lỗi
 `.keys()` khi load tokenizer: xem [bản sửa và lệnh chạy lại TA/IW](ALFWORLD_EVAL_TOKENIZER_FIX.md).
 

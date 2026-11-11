@@ -23,6 +23,11 @@ from pathlib import Path
 from tqdm.auto import tqdm
 
 from .alfworld_env import SPLITS, load_task_splits
+from .alfworld_eval_artifacts import (
+    read_episode_jsonl,
+    read_completed_seed,
+    seed_diagnostics,
+)
 from .config import apply_overrides, load_config, resolve_runtime_paths, save_config
 from .multiseed_evaluation import checkpoint_step, resolve_run_output
 from .alfworld_protocol import resolve_protocol
@@ -431,7 +436,9 @@ def _worker_impl(args, report):
                     trace = _evaluate_episode(
                         task, tokenizer, config, generate, args.seed, sample_index
                     )
-                    handle.write(json.dumps(trace, ensure_ascii=False) + "\n")
+                    # Escaping only changes JSON representation, never response
+                    # text/IDs; also keeps external line-based tools safe.
+                    handle.write(json.dumps(trace, ensure_ascii=True) + "\n")
                     handle.flush()
                     print(
                         f"ALFWorld seed={args.seed} rank={args.rank}: "
@@ -642,12 +649,7 @@ def run_workers(config_path, selected, seed, directory, devices):
                     )
                 )
             time.sleep(0.5)
-        return [
-            json.loads(line)
-            for path in paths
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        return [trace for path in paths for trace in read_episode_jsonl(path)]
     finally:
         for process in processes:
             _terminate_process_group(process)
@@ -659,15 +661,116 @@ def run_workers(config_path, selected, seed, directory, devices):
         progress.close()
 
 
+def _validate_seed_traces(
+    traces, seed, splits, episodes_per_task, fingerprint, directory, *, check_game=False
+):
+    task_lookup = {
+        (split, task["id"]): task for split in SPLITS[1:] for task in splits[split]
+    }
+    expected = {
+        (split, task_id, i)
+        for split, task_id in task_lookup
+        for i in range(episodes_per_task)
+    }
+    actual = [(t["split"], t["task_id"], t.get("sample_index", 0)) for t in traces]
+    if len(actual) != len(set(actual)) or set(actual) != expected:
+        raise RuntimeError(
+            f"Missing/duplicate ID/OOD task/sample results in {directory}; refusing incomplete summary"
+        )
+    if any(t["evaluation_seed"] != seed for t in traces):
+        raise RuntimeError("Worker returned results for a different evaluation seed")
+    if any(not isinstance(t["success"], bool) for t in traces):
+        raise RuntimeError("Episode success must be a JSON boolean")
+    if episodes_per_task == 8 and any(
+        t.get("seed")
+        != sample_seed(seed, task_lookup[(t["split"], t["task_id"])], t["sample_index"])
+        or t.get("environment_seed")
+        != episode_seed(seed, task_lookup[(t["split"], t["task_id"])])
+        for t in traces
+    ):
+        raise RuntimeError(
+            "Worker returned incorrect policy sampling/reset seeds for avg@8/pass@8"
+        )
+    if any(t.get("protocol_fingerprint") != fingerprint for t in traces):
+        raise RuntimeError(
+            "Worker episode protocol fingerprint differs from this evaluation; refusing mixed-protocol summary"
+        )
+    if check_game and any(
+        t.get("game_fingerprint")
+        != task_lookup[(t["split"], t["task_id"])]["game_fingerprint"]
+        for t in traces
+    ):
+        raise RuntimeError(
+            "Saved episode game fingerprint differs from current ALFWorld data"
+        )
+
+
+def _reuse_source(run, args, plan):
+    tag = getattr(args, "reuse_tag", None)
+    if not tag:
+        return None, None
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", tag) or tag == args.tag:
+        raise ValueError(
+            "--reuse-tag must be a different, existing filename component; use a NEW output --tag"
+        )
+    source = run / "alfworld_eval" / tag
+    if getattr(args, "checkpoint_subdir", None):
+        source = source / args.checkpoint_subdir
+    old = json.loads((source / "plan.json").read_text(encoding="utf-8"))
+    for key in ("method", "episodes_per_task", "protocol_fingerprint", "tasks"):
+        if old.get(key) != plan[key]:
+            raise ValueError(
+                f"Cannot reuse ALFWorld results: {key} differs in {source}"
+            )
+    for selected in plan["checkpoints"]:
+        if selected not in old.get("checkpoints", []):
+            raise ValueError(
+                f"Cannot reuse a different checkpoint: {selected} in {source}"
+            )
+    if not old.get("gpus"):
+        raise ValueError(f"Missing original worker topology in {source / 'plan.json'}")
+    return source, old
+
+
+def audit_seed_directory(directory):
+    """Read-only CPU audit of completed episodes; no vLLM/model imports."""
+    directory = Path(directory).expanduser().resolve()
+    match = re.fullmatch(r"seed-([0-9]+)", directory.name)
+    if not match:
+        raise ValueError("--audit-seed expects a seed-N directory")
+    seed = int(match[1])
+    root = directory.parent.parent
+    plan = json.loads((root / "plan.json").read_text(encoding="utf-8"))
+    config = load_config(root / "resolved_config.yaml")
+    splits = load_task_splits(config)
+    traces = read_completed_seed(directory, len(plan["gpus"]))
+    if traces is None:
+        raise RuntimeError(f"No completed episode artifacts in {directory}")
+    _validate_seed_traces(
+        traces,
+        seed,
+        splits,
+        plan["episodes_per_task"],
+        plan["protocol_fingerprint"],
+        directory,
+        check_game=True,
+    )
+    results = per_seed_results(traces, plan["episodes_per_task"])
+    return {
+        "seed": seed,
+        "source": str(directory),
+        "diagnostics": seed_diagnostics(
+            results, traces, config["alfworld"]["protocol_version"]
+        ),
+    }
+
+
 def run_evaluation(args, *, worker_runner=run_workers):
     run, config, checkpoints = build_plan(args)
     devices = [device.strip() for device in args.gpus.split(",")]
     if not devices or any(not d for d in devices) or len(devices) != len(set(devices)):
         raise ValueError("--gpus must list distinct visible device identifiers")
     splits = load_task_splits(config)
-    task_lookup = {
-        (split, task["id"]): task for split in SPLITS[1:] for task in splits[split]
-    }
     episodes_per_task = config["evaluation"]["episodes_per_task"]
     names = metric_names(episodes_per_task)
     expected = {
@@ -681,7 +784,8 @@ def run_evaluation(args, *, worker_runner=run_workers):
         "seeds": args.seeds,
         "checkpoints": checkpoints,
         "tasks": {s: len(splits[s]) for s in SPLITS[1:]},
-        "fresh_episodes": True,
+        "fresh_episodes": not bool(getattr(args, "reuse_tag", None)),
+        "reuse_tag": getattr(args, "reuse_tag", None),
         "episodes_per_task": episodes_per_task,
         "episodes_per_seed": len(expected),
         "total_episodes": len(expected) * len(args.seeds) * len(checkpoints),
@@ -707,8 +811,10 @@ def run_evaluation(args, *, worker_runner=run_workers):
         "training_only_metrics_note": "Standalone episode eval loads no teacher and performs no backward; these diagnostics are recorded in training metrics/TensorBoard, not fabricated at inference.",
     }
     if args.dry_run:
+        _reuse_source(run, args, plan)
         print(json.dumps(plan, indent=2))
         return plan
+    reuse_source, old_plan = _reuse_source(run, args, plan)
     output = run / "alfworld_eval" / args.tag
     if getattr(args, "checkpoint_subdir", None):
         output = output / args.checkpoint_subdir
@@ -731,53 +837,65 @@ def run_evaluation(args, *, worker_runner=run_workers):
                     f"Evaluating {selected['checkpoint']} seed={seed}; logs: {directory}",
                     flush=True,
                 )
-                traces = worker_runner(config_path, selected, seed, directory, devices)
-                actual = [
-                    (t["split"], t["task_id"], t.get("sample_index", 0)) for t in traces
-                ]
-                if len(actual) != len(set(actual)) or set(actual) != expected:
-                    raise RuntimeError(
-                        f"Missing/duplicate ID/OOD task/sample results in {directory}; refusing incomplete summary"
+                cached = (
+                    reuse_source / f"step-{selected['step']:06d}" / f"seed-{seed}"
+                    if reuse_source
+                    else None
+                )
+                traces = (
+                    read_completed_seed(cached, len(old_plan["gpus"]))
+                    if cached
+                    else None
+                )
+                reused = traces is not None
+                if reused:
+                    print(f"Reusing completed episodes: {cached}", flush=True)
+                else:
+                    traces = worker_runner(
+                        config_path, selected, seed, directory, devices
                     )
-                if any(t["evaluation_seed"] != seed for t in traces):
-                    raise RuntimeError(
-                        "Worker returned results for a different evaluation seed"
-                    )
-                if episodes_per_task == 8 and any(
-                    t.get("seed")
-                    != sample_seed(
-                        seed, task_lookup[(t["split"], t["task_id"])], t["sample_index"]
-                    )
-                    or t.get("environment_seed")
-                    != episode_seed(seed, task_lookup[(t["split"], t["task_id"])])
-                    for t in traces
-                ):
-                    raise RuntimeError(
-                        "Worker returned incorrect policy sampling/reset seeds for avg@8/pass@8"
-                    )
-                if any(
-                    t.get("protocol_fingerprint") != plan["protocol_fingerprint"]
-                    for t in traces
-                ):
-                    raise RuntimeError(
-                        "Worker episode protocol fingerprint differs from this evaluation; refusing mixed-protocol summary"
-                    )
+                _validate_seed_traces(
+                    traces,
+                    seed,
+                    splits,
+                    episodes_per_task,
+                    plan["protocol_fingerprint"],
+                    cached if reused else directory,
+                    check_game=reused,
+                )
                 traces.sort(
                     key=lambda t: (t["split"], t["task_id"], t.get("sample_index", 0))
                 )
-                with (directory / "episodes.jsonl").open(
+                with (directory / "episodes.jsonl.tmp").open(
                     "x", encoding="utf-8"
                 ) as handle:
                     for trace in traces:
-                        handle.write(json.dumps(trace, ensure_ascii=False) + "\n")
+                        handle.write(json.dumps(trace, ensure_ascii=True) + "\n")
                         traces_by_task.setdefault(
                             (trace["split"], trace["task_id"]), []
                         ).append(trace)
+                (directory / "episodes.jsonl.tmp").replace(directory / "episodes.jsonl")
                 results = per_seed_results(traces, episodes_per_task)
+                diagnostic = seed_diagnostics(
+                    results, traces, config["alfworld"]["protocol_version"]
+                )
+                _write_json(directory / "diagnostics.json", diagnostic)
+                print(
+                    f"ALFWorld seed {seed}: successes={diagnostic['successes']}/{diagnostic['episodes']}, "
+                    f"parser_failure={100 * diagnostic['parser_failure_rate']:.2f}%, "
+                    f"context_budget={100 * diagnostic['termination_reason_fractions'].get('context_budget', 0):.2f}%; "
+                    f"diagnostics: {directory / 'diagnostics.json'}",
+                    flush=True,
+                )
                 seeds.append(results)
                 _write_json(
                     directory / "summary.json",
-                    {"seed": seed, **selected, "splits": results},
+                    {
+                        "seed": seed,
+                        **selected,
+                        "splits": results,
+                        "reused_from": str(cached) if reused else None,
+                    },
                 )
                 for split, entry in results.items():
                     for kind, values in [("ALL", entry), *entry["task_types"].items()]:
@@ -1018,6 +1136,15 @@ def parser():
     result.add_argument("--set", action="append", default=[])
     result.add_argument("--dry-run", action="store_true")
     result.add_argument(
+        "--reuse-tag",
+        default=os.environ.get("REUSE_TAG"),
+        help="Validate and reuse completed seeds from an old evaluation tag; write to a NEW tag and generate missing seeds",
+    )
+    result.add_argument(
+        "--audit-seed",
+        help="Read-only CPU diagnostics for an existing seed-N directory, including Unicode-safe JSONL reading",
+    )
+    result.add_argument(
         "--allow-protocol-change",
         action="store_true",
         help="Explicitly re-evaluate a legacy checkpoint under a changed interaction protocol, in a new output namespace; never changes the checkpoint",
@@ -1035,7 +1162,18 @@ def parser():
 def main():
     arg_parser = parser()
     args = arg_parser.parse_args()
-    if args.worker:
+    if args.audit_seed:
+        if args.worker or args.run_output or args.checkpoint_paths:
+            arg_parser.error("--audit-seed is a standalone read-only command")
+        print(
+            json.dumps(
+                audit_seed_directory(args.audit_seed),
+                ensure_ascii=True,
+                indent=2,
+                allow_nan=False,
+            )
+        )
+    elif args.worker:
         worker(args)
     elif args.checkpoint_paths:
         if args.run_output or args.checkpoints:
