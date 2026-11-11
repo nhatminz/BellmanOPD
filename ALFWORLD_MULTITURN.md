@@ -1,5 +1,8 @@
 # ALFWorld multi-turn protocol v2 trên B200
 
+Eval dừng ở `Incomplete ALFWorld worker` / `extra_special_tokens` list gây lỗi
+`.keys()` khi load tokenizer: xem [bản sửa và lệnh chạy lại TA/IW](ALFWORLD_EVAL_TOKENIZER_FIX.md).
+
 Protocol v2 sửa giao thức gây `look;`/parser failure và lỗi chuẩn hóa PPO Top-K.
 Đọc phân tích, phản ví dụ và phạm vi sửa ở [ALFWORLD_PROTOCOL_AUDIT.md](ALFWORLD_PROTOCOL_AUDIT.md).
 Code không cam kết checkpoint sau train sẽ có success rate cao: protocol đúng và

@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import signal
 import statistics
 import subprocess
 import sys
@@ -281,11 +282,65 @@ def evaluate_tasks(
 
 
 def worker(args):
+    """Record failures even during imports/model startup, before any episode."""
+    path = Path(args.worker_output)
+    started = time.monotonic()
+    state = {
+        "status": "running",
+        "rank": args.rank,
+        "seed": args.seed,
+        "checkpoint": args.checkpoint,
+        "pid": os.getpid(),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "completed_episodes": 0,
+    }
+
+    def report(phase, **fields):
+        state.update(phase=phase, elapsed_sec=time.monotonic() - started, **fields)
+        try:
+            _write_json(path.with_suffix(".status.json"), state)
+        except OSError as error:
+            # A full/unavailable log filesystem must not hide the original error.
+            print(f"Could not write ALFWorld worker status: {error}", file=sys.stderr)
+        print(
+            f"ALFWorld worker rank={args.rank} GPU={state['cuda_visible_devices']} "
+            f"phase={phase} completed={state['completed_episodes']} "
+            f"elapsed={state['elapsed_sec']:.1f}s",
+            flush=True,
+        )
+
+    try:
+        report("imports")
+        _worker_impl(args, report)
+    except BaseException as error:
+        state.update(
+            status="failed",
+            exception_type=type(error).__name__,
+            message=str(error),
+            traceback=traceback.format_exc(),
+        )
+        report(state["phase"])
+        try:
+            _write_json(path.with_suffix(".error.json"), state)
+        except OSError as write_error:
+            print(
+                f"Could not write ALFWorld worker error: {write_error}", file=sys.stderr
+            )
+        raise
+    else:
+        state["status"] = "complete"
+        report("complete")
+
+
+def _worker_impl(args, report):
     from .models import generation_stop_token_ids, load_student_tokenizer
+    from .tokenizer_compat import prepare_tokenizer_view, verify_tokenizer_view
     from .vllm_evaluation import _release_vllm_engine, _resolve_gpu_memory_utilization
     from vllm import LLM, SamplingParams
 
+    report("load_config")
     config = load_config(args.worker_config)
+    report("load_tasks", method=config["experiment"]["method"])
     tasks = load_task_splits(config)
     probe = config.get("alfworld_probe")
     selected_splits = [probe["split"]] if probe else SPLITS[1:]
@@ -300,7 +355,22 @@ def worker(args):
     config = copy.deepcopy(config)
     if not probe:
         config["models"]["student_path"] = args.checkpoint
+    source = Path(config["models"]["student_path"]).resolve()
+    report("prepare_tokenizer", tokenizer_source=str(source), task_count=len(selected))
+    runtime_tokenizer = prepare_tokenizer_view(
+        source, Path(args.worker_output).with_suffix(".tokenizer")
+    )
+    config["models"]["student_path"] = str(runtime_tokenizer)
+    report(
+        "load_tokenizer",
+        task_count=len(selected),
+        tokenizer_source=str(source),
+        tokenizer_runtime_path=str(runtime_tokenizer),
+        tokenizer_metadata_compatibility_applied=runtime_tokenizer != source,
+    )
     tokenizer = load_student_tokenizer(config)
+    if runtime_tokenizer != source:
+        verify_tokenizer_view(tokenizer, source)
     stop_ids = generation_stop_token_ids(tokenizer, config)
     settings = config["evaluation"]
     episodes_per_task = 1 if probe else int(settings.get("episodes_per_task", 1))
@@ -328,6 +398,7 @@ def worker(args):
             engine_kwargs[name] = vcfg[name]
     engine = None
     try:
+        report("vllm_startup", engine_kwargs=engine_kwargs)
         engine = LLM(**engine_kwargs)
 
         def generate(ids, seed, budget):
@@ -350,6 +421,13 @@ def worker(args):
         with trace_path.open("x", encoding="utf-8") as handle:
             for i, task in enumerate(selected):
                 for sample_index in range(episodes_per_task):
+                    report(
+                        "evaluate_episode",
+                        task_id=task["id"],
+                        split=task["split"],
+                        sample_index=sample_index,
+                        completed_episodes=i * episodes_per_task + sample_index,
+                    )
                     trace = _evaluate_episode(
                         task, tokenizer, config, generate, args.seed, sample_index
                     )
@@ -361,10 +439,90 @@ def worker(args):
                         f"task={task['id']} sample={sample_index + 1}/{episodes_per_task} success={trace['success']}",
                         flush=True,
                     )
-        trace_path.with_suffix(".done").write_text("complete\n", encoding="utf-8")
     finally:
         if engine is not None:
+            if sys.exc_info()[0] is None:
+                report("vllm_cleanup")
             _release_vllm_engine(engine)
+    # Publish completion only after traces are closed and engine cleanup succeeds.
+    trace_path.with_suffix(".done").write_text("complete\n", encoding="utf-8")
+    report("episodes_complete", completed_episodes=len(selected) * episodes_per_task)
+
+
+def _log_tail(path, *, max_bytes=32768, lines=80):
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - max_bytes))
+            return "\n".join(
+                handle.read().decode("utf-8", errors="replace").splitlines()[-lines:]
+            )
+    except OSError as error:
+        return f"Could not read worker log: {error}"
+
+
+def _worker_failure_report(
+    selected, seed, directory, devices, processes, paths, failed, reason
+):
+    """Use one failure path both while workers run and after fast simultaneous exits."""
+    workers = []
+    for rank, process in enumerate(processes):
+        path = paths[rank]
+        row = {
+            "rank": rank,
+            "gpu": devices[rank],
+            "exit_code": process.poll(),
+            "completion_marker": path.with_suffix(".done").is_file(),
+            "log": str(directory / f"rank-{rank:05d}.log"),
+        }
+        if row["exit_code"] is not None and row["exit_code"] < 0:
+            try:
+                row["signal"] = signal.Signals(-row["exit_code"]).name
+            except ValueError:
+                row["signal"] = str(-row["exit_code"])
+        for name in ("status", "error"):
+            source = path.with_suffix(f".{name}.json")
+            if source.is_file():
+                try:
+                    row[name] = json.loads(source.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as error:
+                    row[f"{name}_read_error"] = str(error)
+        row["log_tail"] = _log_tail(Path(row["log"]))
+        workers.append(row)
+    payload = {
+        "checkpoint": selected["checkpoint"],
+        "seed": seed,
+        "reason": reason,
+        "failed_ranks": failed,
+        "workers": workers,
+    }
+    destination = directory / "worker_failures.json"
+    try:
+        _write_json(destination, payload)
+    except OSError as error:
+        print(f"Could not write ALFWorld failure report: {error}", file=sys.stderr)
+    messages = [
+        f"ALFWorld evaluation failed: {reason}; checkpoint={selected['checkpoint']}; seed={seed}.",
+        f"Worker failure details: {destination}",
+    ]
+    for rank in failed:
+        row = workers[rank]
+        state = row.get("error", row.get("status", {}))
+        messages.extend(
+            [
+                f"Worker {rank}, GPU={row['gpu']}, exit_code={row['exit_code']}"
+                f"{', signal=' + row['signal'] if 'signal' in row else ''}, "
+                f"phase={state.get('phase', 'unknown')}, done={row['completion_marker']}; log={row['log']}",
+            ]
+        )
+        if state.get("exception_type"):
+            messages.append(f"{state['exception_type']}: {state.get('message', '')}")
+        if state.get("task_id"):
+            messages.append(
+                f"task={state['task_id']} sample_index={state.get('sample_index')}"
+            )
+        messages.append(f"--- worker {rank} log tail ---\n{row['log_tail']}")
+    return "\n".join(messages)
 
 
 def run_workers(config_path, selected, seed, directory, devices):
@@ -442,27 +600,48 @@ def run_workers(config_path, selected, seed, directory, devices):
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("evaluation.sync_timeout_sec must be positive and finite")
         deadline = time.monotonic() + timeout
-        while any(p.poll() is None for p in processes):
+        while True:
             update_progress()
-            for rank, process in enumerate(processes):
-                if process.poll() not in (None, 0):
-                    raise RuntimeError(
-                        f"ALFWorld evaluation worker {rank} failed; see {directory / f'rank-{rank:05d}.log'}"
+            returncodes = [process.poll() for process in processes]
+            failed = [
+                rank
+                for rank, code in enumerate(returncodes)
+                if code is not None
+                and (
+                    code != 0
+                    or not paths[rank].with_suffix(".done").is_file()
+                    or not paths[rank].is_file()
+                )
+            ]
+            if failed:
+                raise RuntimeError(
+                    _worker_failure_report(
+                        selected,
+                        seed,
+                        directory,
+                        devices,
+                        processes,
+                        paths,
+                        failed,
+                        "worker exited before successful completion",
                     )
+                )
+            if all(code is not None for code in returncodes):
+                break
             if time.monotonic() >= deadline:
                 raise TimeoutError(
-                    f"ALFWorld evaluation worker timeout; inspect logs in {directory}"
+                    _worker_failure_report(
+                        selected,
+                        seed,
+                        directory,
+                        devices,
+                        processes,
+                        paths,
+                        [rank for rank, code in enumerate(returncodes) if code is None],
+                        f"timeout after {timeout:g} seconds",
+                    )
                 )
             time.sleep(0.5)
-        update_progress()
-        for rank, process in enumerate(processes):
-            if (
-                process.returncode != 0
-                or not paths[rank].with_suffix(".done").is_file()
-            ):
-                raise RuntimeError(
-                    f"Incomplete ALFWorld worker {rank}; inspect logs in {directory}"
-                )
         return [
             json.loads(line)
             for path in paths
